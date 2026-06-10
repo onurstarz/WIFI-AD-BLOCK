@@ -1,0 +1,15 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# mitmproxy generated certs (regenerated per-install, never commit private keys)
+certs/
+*.pem
+*.cer
+*.p12
+
+# Editor / OS cruft
+*.swp
+*~
+.DS_Store
