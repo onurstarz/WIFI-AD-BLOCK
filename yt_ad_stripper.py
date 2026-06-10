@@ -4,10 +4,14 @@ YouTube Ad Stripping addon for mitmproxy.
 Intercepts responses from youtubei.googleapis.com, parses both JSON and
 Protobuf payloads, and surgically removes ad-related fields before the
 data reaches client devices.
+
+Requires: Python >= 3.9 (mitmproxy constraint), blackboxprotobuf (optional,
+          needed only for native YouTube Android/iOS app Protobuf responses).
 """
 
+from __future__ import annotations  # makes generic aliases (tuple[], frozenset[]) work on 3.9
+
 import json
-import logging
 from typing import Any
 
 from mitmproxy import ctx, http
@@ -28,12 +32,12 @@ AD_JSON_KEYS: frozenset[str] = frozenset({
     # Companion / overlay ads
     "auxiliaryUi",
     "companionData",
-    "externalVideoId",          # used inside ad companion messages
-    "engagementPanels",         # ad panels (pre-roll interstitials)
-    # Unskippable bumper metadata
+    "externalVideoId",
+    "engagementPanels",
+    # Bumper / skip metadata
     "bumperParams",
     "skippableRenderer",
-    # Ad request / tracking infrastructure
+    # Ad renderer types
     "instreamVideoAdRenderer",
     "linearAdSequenceRenderer",
     "adBreakServiceRenderer",
@@ -41,19 +45,18 @@ AD_JSON_KEYS: frozenset[str] = frozenset({
     "adInfoRenderer",
     "adHoverTextButtonRenderer",
     "adPreviewRenderer",
-    "confirmDialogRenderer",     # "Skip ad" dialogs
+    "confirmDialogRenderer",
     "adsConfig",
     "interstitialConfig",
     "adSlotLoggingData",
 })
 
 # ── Known Protobuf field numbers for ad data in PlayerResponse ───────────────
-# Reverse-engineered from the YouTube mobile client binary and community
-# research.  Field 12 = playerAds, 13 = adSlots, 46 = adBreakParams.
-# Additional fields discovered via blackboxprotobuf inspection.
+# Field 12 = playerAds, 13 = adSlots, 46 = adBreakParams.
+# Reverse-engineered from YouTube mobile client binary + community research.
 AD_PROTO_FIELDS: frozenset[int] = frozenset({12, 13, 21, 46, 58, 102})
 
-# ── Endpoints we care about ───────────────────────────────────────────────────
+# ── Endpoints to intercept ───────────────────────────────────────────────────
 TARGET_HOST = "youtubei.googleapis.com"
 TARGET_PATHS = (
     "/youtubei/v1/player",
@@ -68,11 +71,7 @@ TARGET_PATHS = (
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _strip_json(node: Any, depth: int = 0) -> tuple[Any, int]:
-    """
-    Recursively remove ad keys from a deserialized JSON object.
-    Returns (cleaned_node, number_of_fields_removed).
-    Depth cap prevents infinite recursion on malformed payloads.
-    """
+    """Recursively remove ad keys from a deserialised JSON object."""
     if depth > 40:
         return node, 0
 
@@ -100,10 +99,7 @@ def _strip_json(node: Any, depth: int = 0) -> tuple[Any, int]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _strip_proto(message: dict, depth: int = 0) -> tuple[dict, int]:
-    """
-    Walk a blackboxprotobuf-decoded message dict and drop ad fields.
-    Field numbers are stored as string keys by blackboxprotobuf.
-    """
+    """Drop known ad field numbers from a blackboxprotobuf-decoded message."""
     if depth > 30:
         return message, 0
 
@@ -135,9 +131,9 @@ def _strip_proto(message: dict, depth: int = 0) -> tuple[dict, int]:
 
 def _process_protobuf(body: bytes) -> tuple[bytes, int]:
     try:
-        import blackboxprotobuf
+        import blackboxprotobuf  # type: ignore[import]
     except ImportError:
-        ctx.log.warn("[YT-AdStrip] blackboxprotobuf not installed — skipping protobuf stripping")
+        ctx.log.warn("[YT-AdStrip] blackboxprotobuf not installed — protobuf stripping disabled")
         return body, 0
 
     try:
@@ -157,24 +153,19 @@ class YouTubeAdStripper:
     def response(self, flow: http.HTTPFlow) -> None:
         if TARGET_HOST not in flow.request.pretty_host:
             return
-
         if not any(flow.request.path.startswith(p) for p in TARGET_PATHS):
             return
-
         if flow.response is None or flow.response.content is None:
             return
 
-        content_type = flow.response.headers.get("content-type", "").lower()
+        ct = flow.response.headers.get("content-type", "").lower()
 
-        if "json" in content_type or "javascript" in content_type:
+        if "json" in ct or "javascript" in ct:
             self._handle_json(flow)
-        elif "protobuf" in content_type or "octet-stream" in content_type:
+        elif "protobuf" in ct or "octet-stream" in ct:
             self._handle_protobuf(flow)
         else:
-            # Attempt JSON first, fall back silently
             self._handle_json(flow, silent_fail=True)
-
-    # ── JSON path ─────────────────────────────────────────────────────────────
 
     def _handle_json(self, flow: http.HTTPFlow, silent_fail: bool = False) -> None:
         try:
@@ -189,10 +180,8 @@ class YouTubeAdStripper:
             flow.response.text = json.dumps(data, separators=(",", ":"))
             ctx.log.info(
                 f"[YT-AdStrip] JSON  stripped {removed:2d} ad fields  "
-                f"← {flow.request.path.split('?')[0]}"
+                f"<- {flow.request.path.split('?')[0]}"
             )
-
-    # ── Protobuf path ──────────────────────────────────────────────────────────
 
     def _handle_protobuf(self, flow: http.HTTPFlow) -> None:
         cleaned, removed = _process_protobuf(flow.response.content)
@@ -200,7 +189,7 @@ class YouTubeAdStripper:
         if removed:
             ctx.log.info(
                 f"[YT-AdStrip] Proto stripped {removed:2d} ad fields  "
-                f"← {flow.request.path.split('?')[0]}"
+                f"<- {flow.request.path.split('?')[0]}"
             )
 
 
