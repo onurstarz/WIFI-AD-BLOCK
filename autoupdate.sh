@@ -196,6 +196,32 @@ else
 fi
 
 # =============================================================================
+# 3c. ADAPTIVE DNS OPTIMIZER — re-benchmark and switch to fastest server
+# =============================================================================
+log "Re-benchmarking DNS servers (location-aware adaptive selection)..."
+
+DNS_OPT="$INSTALL_DIR/dns_optimizer.py"
+[ -f "$DNS_OPT" ] || DNS_OPT="$REPO_DIR/dns_optimizer.py"
+
+if [ -n "$PY3_BIN" ] && [ -f "$DNS_OPT" ]; then
+    [ "$DNS_OPT" = "$REPO_DIR/dns_optimizer.py" ] && \
+        cp "$DNS_OPT" "$INSTALL_DIR/dns_optimizer.py" 2>/dev/null || true
+
+    _DNS_RESULT=0
+    "$PY3_BIN" "$INSTALL_DIR/dns_optimizer.py" \
+        >> /var/log/wifi-adblock-dns-optimizer.log 2>&1 || _DNS_RESULT=$?
+
+    if [ "$_DNS_RESULT" = "1" ]; then
+        log "DNS optimizer: switched to a faster server."
+        CHANGED=1
+    else
+        log "DNS optimizer: current server still optimal — no change."
+    fi
+else
+    warn "dns_optimizer.py or Python not found — skipping DNS optimization."
+fi
+
+# =============================================================================
 # 4. ADGUARD HOME BINARY UPDATE
 # =============================================================================
 log "Checking for AdGuard Home updates..."

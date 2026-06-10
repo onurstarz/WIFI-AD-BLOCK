@@ -513,6 +513,36 @@ def update_dnsmasq_dhcp(net: NetworkInfo) -> None:
         log.warning(f"Could not update dnsmasq: {e}")
 
 
+def optimize_dns() -> None:
+    """
+    Re-benchmark DNS servers for the new network location and switch to the
+    fastest. A new network = new physical location = different server latencies,
+    so this runs on every network change. The optimizer's own "sniper" logic
+    decides whether a switch is actually justified.
+    """
+    optimizer = None
+    for cand in (os.path.join(INSTALL_DIR, "dns_optimizer.py"),
+                 "/opt/mitm-proxy/dns_optimizer.py",
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "dns_optimizer.py")):
+        if os.path.exists(cand):
+            optimizer = cand
+            break
+    if not optimizer:
+        log.info("dns_optimizer.py not found — skipping DNS benchmark.")
+        return
+    log.info("Re-benchmarking DNS servers for new network location...")
+    try:
+        # Run in background — a full benchmark takes a few seconds and we don't
+        # want to block the rest of reconfiguration on it.
+        subprocess.Popen(
+            [sys.executable, optimizer],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError as e:
+        log.warning(f"Could not launch dns_optimizer: {e}")
+
+
 def reconfigure(net: NetworkInfo) -> None:
     """Full reconfiguration for a newly detected network."""
     log.info(f"Reconfiguring for {net}")
@@ -521,6 +551,8 @@ def reconfigure(net: NetworkInfo) -> None:
     update_dnsmasq_dhcp(net)
     # Restart mitmproxy so it re-binds to the current interface
     _restart("mitm-adblock")
+    # New location → re-rank DNS servers and switch if a faster one exists
+    optimize_dns()
     log.info("Reconfiguration complete.")
 
 
