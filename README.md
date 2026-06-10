@@ -1,11 +1,12 @@
 # WIFI-AD-BLOCK
 
-Network-wide ad blocking for every device on your Wi-Fi. Two layers working together:
+Network-wide ad blocking **and malware protection** for every device on your Wi-Fi. Layers working together:
 
-1. **DNS sinkhole (AdGuard Home)** — blocks ads delivered from dedicated ad-network domains: mobile game ads, browser banners/pop-ups, in-app banners, tracking, telemetry. This is the broad workhorse.
-2. **Transparent HTTPS proxy (mitmproxy)** — strips YouTube ads that are served from the *same* servers as the video, which DNS alone can't touch.
+1. **DNS sinkhole (AdGuard Home)** — blocks ads delivered from dedicated ad-network domains: mobile game ads, browser banners/pop-ups, in-app banners, tracking, telemetry. Also blocks known malware/phishing domains. The broad workhorse.
+2. **Transparent HTTPS proxy (mitmproxy)** — strips YouTube ads served from the *same* servers as the video, which DNS alone can't touch.
+3. **ClamAV download scanner** — scans files crossing the proxy and blocks infected downloads before they reach any device.
 
-**Stack:** `AdGuard Home` (DNS) + `mitmproxy` (transparent mode) → `yt_ad_stripper.py` → `iptables` (traffic redirect) → `dnsmasq` / UCI (DHCP gateway announcement)
+**Stack:** `AdGuard Home` (DNS + malware domains) + `mitmproxy` (`yt_ad_stripper.py` + `malware_scanner.py`) → `ClamAV` → `iptables` (traffic redirect) → `dnsmasq` / UCI (DHCP gateway announcement)
 
 ---
 
@@ -97,10 +98,13 @@ DHCP_END="192.168.1.200"
 ```sh
 sudo sh setup.sh          # mitmproxy YouTube stripper + iptables + service
 sudo sh dns_sinkhole.sh   # AdGuard Home DNS sinkhole (the broad ad blocker)
+sudo sh malware_block.sh  # ClamAV download scanner + DNS malware blocking
 sudo sh network_config.sh # static IP + DHCP advertising this box as gateway+DNS
 ```
 
-All three scripts are safe to re-run.
+All scripts are safe to re-run. Run `malware_block.sh` *after* `setup.sh`
+(it patches the proxy service to load the scanner) and after AdGuard Home's
+first-run wizard (so it can enable Safe Browsing).
 
 After `dns_sinkhole.sh`, open `http://<BOX_IP>:3000` once to finish AdGuard
 Home's first-run wizard (set DNS to listen on all interfaces / port 53, create
@@ -236,6 +240,54 @@ wget -O - https://raw.githubusercontent.com/Entware/Entware/master/setup/setup.s
 Then edit `MITMDUMP_BIN` in the service init file to point at `/opt/bin/mitmdump`.
 
 ---
+
+## Malware protection
+
+Three layers, installed by `malware_block.sh`:
+
+1. **ClamAV live download scanning.** `malware_scanner.py` hooks the mitmproxy
+   response loop. When a device downloads a file (detected by content-type,
+   `Content-Disposition: attachment`, or a risky extension), the bytes are
+   streamed to the ClamAV daemon *before* reaching the device. Infected →
+   the download is replaced with a block page. Fail-open by design: if the AV
+   daemon is down, traffic passes through rather than taking your network
+   offline (a warning is logged instead).
+
+2. **DNS malware/phishing blocking.** AdGuard Home's Safe Browsing is enabled
+   and you add threat-intelligence blocklists (URLhaus, Phishing Army, HaGeZi).
+   Clicking a known-malicious link fails to resolve — the connection never
+   opens.
+
+3. **Security-filtering upstream DNS (Quad9).** Set AdGuard Home's upstream to
+   `https://dns.quad9.net/dns-query`. Quad9 refuses malicious domains at the
+   resolver, so even brand-new threats not yet in your local blocklists get
+   caught.
+
+**Test it** with the harmless EICAR test signature (the industry-standard AV
+test file — not real malware):
+
+```sh
+curl http://www.eicar.org/download/eicar.com
+# Expect: the "Malware Blocked" page instead of the file
+```
+
+Watch the scanner work:
+
+```sh
+journalctl -fu mitm-adblock | grep Malware   # systemd
+logread -f | grep Malware                    # OpenWrt
+```
+
+**What this does and doesn't do:**
+
+- ✅ Blocks **navigation** to known-malicious domains (DNS) — a clicked malware
+  link won't open.
+- ✅ Blocks **infected file downloads** over HTTP and decryptable HTTPS (ClamAV).
+- ⚠️ It does **not** delete the link out of a search-results page. Google's
+  results page is HTTPS from Google's own servers; the link may still be listed,
+  but clicking it is blocked. Functionally you're protected; the text isn't erased.
+- ⚠️ Downloads inside **certificate-pinned** apps (the same ones that bypass ad
+  stripping) aren't scanned, because the proxy can't see inside them.
 
 ## QUIC / HTTP3 workaround
 
