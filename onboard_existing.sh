@@ -10,12 +10,15 @@
 #   ✓  ARP traffic interception (all traffic routed through the box)
 #   ✓  WireGuard bypass for Discord / Roblox
 #   ✓  Adaptive DNS — fastest server selected for their network
-#   ✓  Captive portal permanently suppressed for them
 #   ✓  HTTPS pass-through — their HTTPS works normally, no cert errors
+#
+# What they see once (one-time upgrade notice popup, same as hotel Wi-Fi):
+#   →  A captive-portal-style page explaining the cert install step
+#   →  "Install Certificate" or "Maybe Later" — after either choice, no more popups
 #
 # What they don't get until they install the CA cert:
 #   —  HTTPS deep inspection (YouTube ad stripping, download scanning)
-#      Available via:  http://BOX_IP/portal
+#      One click from the upgrade notice: http://BOX_IP/upgrade-notice
 #
 # The moment any existing device installs the CA cert and hits /cert-upgrade,
 # their iptables bypass is removed and they get full protection automatically.
@@ -27,12 +30,14 @@ INSTALL_DIR="/opt/mitm-proxy"
 mkdir -p "$INSTALL_DIR"
 
 SEEN_FILE="$INSTALL_DIR/seen_devices.txt"
+EXISTING_FILE="$INSTALL_DIR/existing_devices.txt"
 EXISTING_IPS="$INSTALL_DIR/existing_ips.txt"
 LOG="/var/log/wifi-adblock-install.log"
 
 log()  { printf '\033[1;32m[onboard]\033[0m %s\n' "$*" | tee -a "$LOG"; }
 
 touch "$SEEN_FILE" 2>/dev/null || true
+touch "$EXISTING_FILE" 2>/dev/null || true
 > "${EXISTING_IPS}.new"
 
 FOUND_MACs=0
@@ -50,9 +55,10 @@ add_device() {
     case "$_mac" in
         ''|'00:00:00:00:00:00'|'*') return ;;
     esac
-    # Mark as portal-seen so they never get the captive portal
-    if ! grep -qF "$_mac" "$SEEN_FILE" 2>/dev/null; then
-        printf '%s\n' "$_mac" >> "$SEEN_FILE"
+    # Track as an existing device so the portal shows the upgrade notice once
+    # (NOT added to seen_devices.txt — they still get the OS captive-portal prompt)
+    if ! grep -qF "$_mac" "$EXISTING_FILE" 2>/dev/null; then
+        printf '%s\n' "$_mac" >> "$EXISTING_FILE"
         FOUND_MACs=$((FOUND_MACs + 1))
     fi
     # Add to HTTPS bypass list

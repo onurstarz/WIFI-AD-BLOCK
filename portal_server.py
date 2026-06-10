@@ -28,10 +28,11 @@ import threading
 from typing import Optional
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-PORTAL_PORT  = 80
-SEEN_FILE    = "/opt/mitm-proxy/seen_devices.txt"
-CERT_DIR     = "/opt/mitm-proxy/certs"
-NETWORK_NAME = "Protected Network"
+PORTAL_PORT     = 80
+SEEN_FILE       = "/opt/mitm-proxy/seen_devices.txt"
+EXISTING_FILE   = "/opt/mitm-proxy/existing_devices.txt"
+CERT_DIR        = "/opt/mitm-proxy/certs"
+NETWORK_NAME    = "Protected Network"
 
 # ── OS captive-portal detection paths + expected responses ────────────────────
 # Each entry: path → (os_hint, content_type, body)
@@ -103,6 +104,18 @@ def _is_seen(ip: str) -> bool:
         if not os.path.exists(SEEN_FILE):
             return False
         with open(SEEN_FILE) as f:
+            return mac in f.read()
+
+
+def _is_existing_device(ip: str) -> bool:
+    """True if this IP was on the network before the box was installed."""
+    mac = _mac_for_ip(ip)
+    if not mac:
+        return False
+    with _seen_lock:
+        if not os.path.exists(EXISTING_FILE):
+            return False
+        with open(EXISTING_FILE) as f:
             return mac in f.read()
 
 
@@ -209,6 +222,9 @@ class PortalHandler(http.server.BaseHTTPRequestHandler):
                     self._send(204)
                 else:
                     self._send(200, ctype, body)
+            elif _is_existing_device(client_ip):
+                # Pre-existing device — show one-time upgrade notice
+                self._serve_upgrade_notice(client_ip)
             else:
                 # New device — show the portal page
                 self._serve_portal(client_ip)
@@ -216,6 +232,14 @@ class PortalHandler(http.server.BaseHTTPRequestHandler):
 
         # ── "Got it" action ───────────────────────────────────────────────────
         if path == "/portal-accept":
+            _mark_seen(client_ip)
+            self._send(302, headers={"Location": "/portal-done"})
+            return
+
+        # ── Existing device: "Maybe Later" dismiss ────────────────────────────
+        # Marks them as fully seen so the upgrade notice never appears again.
+        # Their HTTPS bypass stays in place — they just don't get prompted again.
+        if path == "/upgrade-accept":
             _mark_seen(client_ip)
             self._send(302, headers={"Location": "/portal-done"})
             return
@@ -241,6 +265,10 @@ class PortalHandler(http.server.BaseHTTPRequestHandler):
     def _serve_portal(self, client_ip: str):
         self._send(200, "text/html; charset=utf-8",
                    _portal_html(_detect_box_ip(), NETWORK_NAME))
+
+    def _serve_upgrade_notice(self, client_ip: str):
+        self._send(200, "text/html; charset=utf-8",
+                   _upgrade_notice_html(_detect_box_ip()))
 
     def _serve_file(self, path: str, ctype: str, filename: str):
         if not os.path.exists(path):
@@ -271,6 +299,94 @@ class PortalHandler(http.server.BaseHTTPRequestHandler):
 
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
+
+def _upgrade_notice_html(box_ip: str) -> str:
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Unlock Full Protection</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+     background:#0d0d0d;color:#e0e0e0;min-height:100vh;
+     display:flex;align-items:center;justify-content:center;padding:1rem}}
+.card{{max-width:420px;width:100%;background:#181818;border-radius:18px;
+       border:1px solid #262626;overflow:hidden;
+       box-shadow:0 20px 60px rgba(0,0,0,.6)}}
+.header{{background:linear-gradient(150deg,#1a1400 0%,#1a1100 100%);
+         padding:2rem 1.5rem;text-align:center;
+         border-bottom:1px solid #332800}}
+.icon{{font-size:2.8rem;margin-bottom:.6rem}}
+h1{{font-size:1.2rem;font-weight:700;color:#f0c040;letter-spacing:-.01em}}
+.sub{{font-size:.78rem;color:#8a7040;margin-top:.3rem}}
+.body{{padding:1.4rem}}
+.section{{font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;
+          color:#555;margin:.9rem 0 .4rem}}
+.row{{display:flex;align-items:center;gap:.6rem;padding:.55rem .7rem;
+      border-radius:8px;margin-bottom:.3rem;font-size:.82rem}}
+.row-on{{background:#0d1a0d;color:#6ddf6d;border:1px solid #1e3a1e}}
+.row-off{{background:#1a1400;color:#f0c040;border:1px solid #332800}}
+.row .mark{{font-size:1rem;flex-shrink:0}}
+.cert-box{{background:#111;border:1px solid #2a2a2a;border-radius:10px;
+           padding:.9rem;margin:1rem 0}}
+.cert-box h3{{font-size:.82rem;color:#c9d1d9;margin-bottom:.3rem;font-weight:600}}
+.cert-box p{{font-size:.73rem;color:#666;line-height:1.4;margin-bottom:.55rem}}
+.btn{{display:block;width:100%;text-align:center;padding:.6rem .8rem;
+      border-radius:8px;font-size:.8rem;font-weight:500;text-decoration:none;
+      margin-bottom:.4rem;cursor:pointer;border:none;transition:opacity .15s}}
+.btn:hover{{opacity:.85}}
+.btn-pem{{background:#1e1e2a;color:#a0a0f0;border:1px solid #2a2a44}}
+.btn-cer{{background:#1a1e2a;color:#80b0f0;border:1px solid #222a44}}
+.btn-activated{{background:#1a3a1a;color:#7dff7d;border:1px solid #2a5a2a;
+                font-weight:600;padding:.7rem}}
+.btn-later{{background:#1a1a1a;color:#666;border:1px solid #2a2a2a;
+            font-size:.78rem;margin-top:.2rem}}
+.note{{font-size:.67rem;color:#444;text-align:center;margin-top:.7rem;line-height:1.5}}
+</style>
+</head><body>
+<div class="card">
+  <div class="header">
+    <div class="icon">⚡</div>
+    <h1>One step to unlock full protection</h1>
+    <div class="sub">You're already on this protected network</div>
+  </div>
+  <div class="body">
+
+    <div class="section">Already active on your device</div>
+    <div class="row row-on"><span class="mark">✓</span> DNS ad &amp; tracker blocking</div>
+    <div class="row row-on"><span class="mark">✓</span> Malware &amp; phishing shield</div>
+    <div class="row row-on"><span class="mark">✓</span> Discord &amp; Roblox tunnel</div>
+    <div class="row row-on"><span class="mark">✓</span> Browser YouTube ads blocked</div>
+
+    <div class="section">Unlocked by installing the certificate</div>
+    <div class="row row-off"><span class="mark">→</span> YouTube <em>app</em> ad stripping</div>
+    <div class="row row-off"><span class="mark">→</span> HTTPS malware download scanning</div>
+
+    <div class="cert-box">
+      <h3>Install the security certificate</h3>
+      <p>Lets the network remove ads from encrypted traffic.
+         Works like a corporate CA — fully removable at any time.</p>
+      <a class="btn btn-pem" href="http://{box_ip}/mitmproxy-ca-cert.pem">
+        Download — iOS / macOS / Windows (.pem)
+      </a>
+      <a class="btn btn-cer" href="http://{box_ip}/mitmproxy-ca-cert.cer">
+        Download — Android (.cer)
+      </a>
+      <a class="btn btn-activated" href="/cert-upgrade">
+        ✓ &nbsp;I've installed it — enable full protection
+      </a>
+    </div>
+
+    <a class="btn btn-later" href="/upgrade-accept">
+      Maybe Later — Continue Browsing &rsaquo;
+    </a>
+    <p class="note">This notice won't appear again on this device.</p>
+
+  </div>
+</div>
+</body></html>"""
+
 
 def _portal_html(box_ip: str, network_name: str) -> str:
     return f"""<!doctype html>
