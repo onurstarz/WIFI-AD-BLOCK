@@ -7,13 +7,15 @@
 #
 # What it does — fully automatically, no prompts:
 #   1. Auto-detects your network interface, current IP, and router IP
-#   2. Runs setup.sh       — mitmproxy YouTube stripper + iptables + service
-#   3. Runs dns_sinkhole.sh — AdGuard Home DNS + malware domain blocking
-#   4. Runs malware_block.sh — ClamAV live download scanning
-#   5. Runs network_config.sh — static IP + DHCP gateway announcement
-#   6. Installs autoupdate timer (runs nightly 1–7 AM, self-scheduling)
-#   7. Installs watchdog timer (runs every 10 min, auto-heals broken services)
-#   8. Runs healthcheck.sh to confirm everything is live
+#   2. Runs setup.sh           — mitmproxy YouTube stripper + iptables + service
+#   3. Runs dns_sinkhole.sh    — AdGuard Home DNS + malware domain blocking
+#   4. Runs malware_block.sh   — ClamAV live download scanning
+#   5. Runs network_config.sh  — local dnsmasq DHCP config
+#   6. Runs captive_portal.sh  — first-connection welcome page per device
+#   7. Runs netwatch_setup.sh  — ARP intercept daemon (no router changes needed)
+#   8. Installs autoupdate timer (runs nightly 1–7 AM, self-scheduling)
+#   9. Installs watchdog timer (runs every 10 min, auto-heals broken services)
+#  10. Runs healthcheck.sh to confirm everything is live
 #
 # NOTE: bypass_censorship.sh (WireGuard for Discord/Roblox) is NOT run here
 # because it needs your VPN peer keys. Run it separately once you have them:
@@ -51,7 +53,7 @@ printf 'Install started: %s\n' "$(date)" >> "$LOG_FILE"
 # =============================================================================
 # STEP 1 — AUTO-DETECT NETWORK SETTINGS
 # =============================================================================
-hdr "Step 1/8 — Detecting network"
+hdr "Step 1/10 — Detecting network"
 
 # Get the interface used by the default route
 _DEF_ROUTE="$(ip route show default 2>/dev/null | head -1)"
@@ -111,38 +113,44 @@ fi
 # =============================================================================
 # STEP 2 — MITMPROXY + IPTABLES
 # =============================================================================
-hdr "Step 2/8 — mitmproxy transparent proxy"
+hdr "Step 2/10 — mitmproxy transparent proxy"
 sh "$REPO_DIR/setup.sh" 2>&1 | tee -a "$LOG_FILE"
 
 # =============================================================================
 # STEP 3 — DNS SINKHOLE
 # =============================================================================
-hdr "Step 3/8 — AdGuard Home DNS sinkhole"
+hdr "Step 3/10 — AdGuard Home DNS sinkhole"
 sh "$REPO_DIR/dns_sinkhole.sh" 2>&1 | tee -a "$LOG_FILE"
 
 # =============================================================================
 # STEP 4 — MALWARE SHIELD
 # =============================================================================
-hdr "Step 4/8 — ClamAV malware scanner"
+hdr "Step 4/10 — ClamAV malware scanner"
 sh "$REPO_DIR/malware_block.sh" 2>&1 | tee -a "$LOG_FILE"
 
 # =============================================================================
-# STEP 5 — NETWORK GATEWAY CONFIG
+# STEP 5 — NETWORK GATEWAY CONFIG (local dnsmasq DHCP)
 # =============================================================================
-hdr "Step 5/8 — Network gateway"
+hdr "Step 5/10 — Network gateway (local DHCP)"
 sh "${NETCONF}.patched" 2>&1 | tee -a "$LOG_FILE"
 rm -f "${NETCONF}.patched"
 
 # =============================================================================
-# STEP 5b — CAPTIVE PORTAL
+# STEP 6 — CAPTIVE PORTAL
 # =============================================================================
-hdr "Step 5b/8 — Captive portal (first-connection welcome page)"
+hdr "Step 6/10 — Captive portal (first-connection welcome page)"
 sh "$REPO_DIR/captive_portal.sh" 2>&1 | tee -a "$LOG_FILE"
 
 # =============================================================================
-# STEP 6 — INSTALL AUTOUPDATE (1–7 AM WINDOW)
+# STEP 7 — NETWATCH DAEMON (ARP intercept + auto-reconfigure)
 # =============================================================================
-hdr "Step 6/8 — Autoupdate timer (1–7 AM)"
+hdr "Step 7/10 — NetWatch daemon (ARP intercept, portable network support)"
+sh "$REPO_DIR/netwatch_setup.sh" 2>&1 | tee -a "$LOG_FILE"
+
+# =============================================================================
+# STEP 8 — INSTALL AUTOUPDATE (1–7 AM WINDOW)
+# =============================================================================
+hdr "Step 8/10 — Autoupdate timer (1–7 AM)"
 
 INIT_SYS="sysvinit"
 [ -d /run/systemd/system ] && INIT_SYS=systemd
@@ -184,9 +192,9 @@ else
 fi
 
 # =============================================================================
-# STEP 7 — INSTALL WATCHDOG (EVERY 10 MINUTES)
+# STEP 9 — INSTALL WATCHDOG (EVERY 10 MINUTES)
 # =============================================================================
-hdr "Step 7/8 — Watchdog timer (every 10 min)"
+hdr "Step 9/10 — Watchdog timer (every 10 min)"
 
 if [ "$INIT_SYS" = "systemd" ]; then
     cat > /etc/systemd/system/wifi-adblock-watchdog.timer << EOF
@@ -220,9 +228,9 @@ else
 fi
 
 # =============================================================================
-# STEP 8 — HEALTH CHECK
+# STEP 10 — HEALTH CHECK
 # =============================================================================
-hdr "Step 8/8 — Verifying all layers are live"
+hdr "Step 10/10 — Verifying all layers are live"
 sleep 5  # give services a moment to fully start
 sh "$REPO_DIR/healthcheck.sh" -q 2>&1 | tee -a "$LOG_FILE" || true
 

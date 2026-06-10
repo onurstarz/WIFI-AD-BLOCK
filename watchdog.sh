@@ -151,7 +151,27 @@ if [ -n "$DISK_USE" ] && [ "$DISK_USE" -gt 85 ]; then
     find /var/log -name '*.gz'  -mtime +30 -delete 2>/dev/null || true
 fi
 
-# ── 6. WireGuard bypass (if configured) ──────────────────────────────────────
+# ── 6. NetWatch daemon ───────────────────────────────────────────────────────
+
+NETWATCH_OK=0
+case "$INIT_SYS" in
+    systemd) service_running wifi-adblock-netwatch 2>/dev/null && NETWATCH_OK=1 ;;
+    openrc)  service_running wifi-adblock-netwatch 2>/dev/null && NETWATCH_OK=1 ;;
+    procd)   service_running wifi-adblock-netwatch 2>/dev/null && NETWATCH_OK=1 ;;
+    runit)   service_running wifi-adblock-netwatch 2>/dev/null && NETWATCH_OK=1 ;;
+    *)       pgrep -f "netwatch.py" >/dev/null 2>&1            && NETWATCH_OK=1 ;;
+esac
+# Also check via pgrep as a fallback for all init systems
+if [ "$NETWATCH_OK" = "0" ]; then
+    pgrep -f "netwatch.py" >/dev/null 2>&1 && NETWATCH_OK=1
+fi
+if [ "$NETWATCH_OK" = "0" ]; then
+    warn "wifi-adblock-netwatch is NOT running — ARP intercept is down."
+    restart_service wifi-adblock-netwatch 2>/dev/null || \
+        /etc/init.d/wifi-adblock-netwatch start 2>/dev/null || true
+fi
+
+# ── 7. WireGuard bypass (if configured) ──────────────────────────────────────
 
 if command -v wg >/dev/null 2>&1 && [ -f /etc/wireguard/wg-bypass.conf ]; then
     if ! wg show wg-bypass >/dev/null 2>&1; then
