@@ -1,8 +1,34 @@
 # WIFI-AD-BLOCK
 
-A transparent HTTPS interception pipeline that strips YouTube ad payloads at the network level — before they ever reach your devices.
+Network-wide ad blocking for every device on your Wi-Fi. Two layers working together:
 
-**Stack:** `mitmproxy` (transparent mode) → `yt_ad_stripper.py` (Python addon) → `iptables` (traffic redirect) → `dnsmasq` / UCI (DHCP gateway announcement)
+1. **DNS sinkhole (AdGuard Home)** — blocks ads delivered from dedicated ad-network domains: mobile game ads, browser banners/pop-ups, in-app banners, tracking, telemetry. This is the broad workhorse.
+2. **Transparent HTTPS proxy (mitmproxy)** — strips YouTube ads that are served from the *same* servers as the video, which DNS alone can't touch.
+
+**Stack:** `AdGuard Home` (DNS) + `mitmproxy` (transparent mode) → `yt_ad_stripper.py` → `iptables` (traffic redirect) → `dnsmasq` / UCI (DHCP gateway announcement)
+
+---
+
+## What actually gets blocked (read this first)
+
+Ads come in two kinds, and only one is fully beatable at the router:
+
+| | DNS sinkhole | + mitmproxy | Notes |
+|---|---|---|---|
+| Browser pop-up / banner ads | ✅ | ✅ | |
+| Most mobile game ads (AdMob, Unity, AppLovin) | ✅ | ✅ | Served from ad domains |
+| Most in-app banner / interstitial ads | ✅ | ✅ | |
+| Tracking / telemetry | ✅ | ✅ | |
+| Spotify ads | ⚠️ partial | ⚠️ partial | Some served from content servers |
+| YouTube (browser + app) | ⚠️ partial | ✅ **full** | mitmproxy strips same-server ads |
+| **TikTok / Instagram feed ads** | ❌ | ❌ | See below — not router-blockable |
+
+**Why TikTok and Instagram feed ads can't be blocked router-side:**
+
+1. **Certificate pinning** — these apps reject any TLS connection not signed by their exact certificate, so mitmproxy can't decrypt their traffic at all (the app just shows "no connection").
+2. **Same-server delivery** — feed ads arrive through the identical API call as your normal content, so DNS can't distinguish ad from post.
+
+Blocking those would require **rooting/jailbreaking each phone** and patching the app per-device — fragile, breaks on every update, and not "connect to Wi-Fi and it works." This project deliberately stays router-only, so those feed ads are out of scope. Everything else in the table above is covered.
 
 ---
 
@@ -66,14 +92,20 @@ DHCP_START="192.168.1.100"
 DHCP_END="192.168.1.200"
 ```
 
-### 2. Run setup (as root)
+### 2. Run setup (as root, in this order)
 
 ```sh
-sudo sh setup.sh
-sudo sh network_config.sh
+sudo sh setup.sh          # mitmproxy YouTube stripper + iptables + service
+sudo sh dns_sinkhole.sh   # AdGuard Home DNS sinkhole (the broad ad blocker)
+sudo sh network_config.sh # static IP + DHCP advertising this box as gateway+DNS
 ```
 
-Both scripts are safe to re-run.
+All three scripts are safe to re-run.
+
+After `dns_sinkhole.sh`, open `http://<BOX_IP>:3000` once to finish AdGuard
+Home's first-run wizard (set DNS to listen on all interfaces / port 53, create
+an admin login, add blocklists). Then set `DNS_SERVER="<BOX_IP>"` in
+`network_config.sh` so your devices use AdGuard Home for DNS.
 
 ### 3. Configure your router
 
