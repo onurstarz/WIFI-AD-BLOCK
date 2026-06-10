@@ -13,9 +13,13 @@
 #   5. Runs network_config.sh  — local dnsmasq DHCP config
 #   6. Runs captive_portal.sh  — first-connection welcome page per device
 #   7. Runs netwatch_setup.sh  — ARP intercept daemon (no router changes needed)
-#   8. Installs autoupdate timer (runs nightly 1–7 AM, self-scheduling)
-#   9. Installs watchdog timer (runs every 10 min, auto-heals broken services)
-#  10. Runs healthcheck.sh to confirm everything is live
+#   8. Runs onboard_existing.sh — silently protects devices already on the LAN
+#   9. Installs autoupdate timer (runs nightly 1–7 AM, self-scheduling)
+#  10. Installs watchdog timer (runs every 10 min, auto-heals broken services)
+#  11. Runs healthcheck.sh to confirm everything is live
+#  12. Runs selftest.sh — a live go-live test. If ANY critical layer fails,
+#      install.sh self-destructs (selfdestruct.sh) back to a clean machine so
+#      the network is never left in a broken, internet-blocking state.
 #
 # NOTE: bypass_censorship.sh (WireGuard for Discord/Roblox) is NOT run here
 # because it needs your VPN peer keys. Run it separately once you have them:
@@ -236,9 +240,36 @@ fi
 # =============================================================================
 # STEP 10 — HEALTH CHECK
 # =============================================================================
-hdr "Step 11/10 — Verifying all layers are live"
+hdr "Step 11/12 — Verifying all layers are live"
 sleep 5  # give services a moment to fully start
 sh "$REPO_DIR/healthcheck.sh" -q 2>&1 | tee -a "$LOG_FILE" || true
+
+# =============================================================================
+# STEP 11 — GO-LIVE ACCEPTANCE TEST (self-destruct gate)
+# =============================================================================
+# This is the final gate. selftest.sh drives every layer LIVE. If any critical
+# layer is broken — or, worst case, traffic is being redirected into a dead
+# proxy — it exits non-zero and we self-destruct: full teardown back to a clean
+# machine so the network is NEVER left in a half-working, internet-breaking
+# state. A clean machine you can fix beats a live machine that's down.
+hdr "Step 12/12 — Go-live acceptance test"
+sleep 3  # let services settle after the healthcheck
+
+if sh "$REPO_DIR/selftest.sh" 2>&1 | tee -a "$LOG_FILE"; then
+    log "Acceptance test PASSED — going live."
+else
+    warn "Acceptance test FAILED — triggering self-destruct."
+    sh "$REPO_DIR/selfdestruct.sh" 2>&1 | tee -a "$LOG_FILE" || true
+    printf '\n\033[1;31m'
+    printf '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+    printf '  INSTALL ABORTED — system self-destructed to a clean state.\n'
+    printf '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+    printf '\033[0m\n'
+    log "The network is back to normal. Review the failures above in:"
+    log "  $LOG_FILE"
+    log "Fix them, then re-run:  sudo sh $0"
+    exit 1
+fi
 
 # =============================================================================
 # MARK AS INSTALLED + DONE
