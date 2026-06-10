@@ -134,6 +134,12 @@ sh "${NETCONF}.patched" 2>&1 | tee -a "$LOG_FILE"
 rm -f "${NETCONF}.patched"
 
 # =============================================================================
+# STEP 5b — CAPTIVE PORTAL
+# =============================================================================
+hdr "Step 5b/8 — Captive portal (first-connection welcome page)"
+sh "$REPO_DIR/captive_portal.sh" 2>&1 | tee -a "$LOG_FILE"
+
+# =============================================================================
 # STEP 6 — INSTALL AUTOUPDATE (1–7 AM WINDOW)
 # =============================================================================
 hdr "Step 6/8 — Autoupdate timer (1–7 AM)"
