@@ -12,6 +12,9 @@ Requires: Python >= 3.9 (mitmproxy constraint), blackboxprotobuf (optional,
 from __future__ import annotations  # makes generic aliases (tuple[], frozenset[]) work on 3.9
 
 import json
+import os
+import re
+import time
 from typing import Any
 
 from mitmproxy import ctx, http
@@ -50,6 +53,61 @@ AD_JSON_KEYS: frozenset[str] = frozenset({
     "interstitialConfig",
     "adSlotLoggingData",
 })
+
+# ── Discovery: log unknown ad keys found in live traffic ─────────────────────
+# When YouTube updates their ad format, new keys appear that we don't know
+# about yet. We detect them here and log them for yt_updater.py to pick up.
+
+_DISCOVERY_LOG  = "/var/log/wifi-adblock-ad-discoveries.log"
+_session_logged: set[str] = set()  # deduplicate within one proxy session
+
+_UNKNOWN_AD_RE = re.compile(
+    r'^playerAd'
+    r'|^adSlot|^adPlacement|^adBreak|^adPod|^adSet|^adParam'
+    r'|^adMessage|^adContent|^adPreview|^adInfo|^paidContent'
+    r'|^youtubeAds|^piUseFreewheel'
+    r'|^(?:instream|preroll|midroll|postroll|bumper|companion|overlay|masthead)(?:[A-Z]|Ad|$)'
+    r'|(?:Ad|Ads)(?:Renderer|Module|Format|Config|Data|Info|Metadata|Slot|Placement|Break)$'
+    r'|(?:monetiz|auction|promoted|sponsor).+(?:Renderer|Data|Config|Info)'
+)
+
+
+def _is_unknown_ad_key(k: str) -> bool:
+    return bool(_UNKNOWN_AD_RE.search(k)) and k not in AD_JSON_KEYS
+
+
+def _log_discovery(key: str) -> None:
+    if key in _session_logged:
+        return
+    _session_logged.add(key)
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(_DISCOVERY_LOG, "a") as f:
+            f.write(f"{ts} DISCOVERY {key}\n")
+        ctx.log.warn(f"[YT-AdStrip] DISCOVERY new ad key not in strip list: {key}"
+                     " — yt_updater.py will add it on next run")
+    except OSError:
+        pass
+
+
+def _scan_for_discoveries(node: Any, depth: int = 0) -> None:
+    """
+    After stripping, scan the response for any remaining keys that look like
+    ad structures but aren't in our list — these are keys YouTube added since
+    our last update. yt_updater.py reads the discovery log and adds them.
+    """
+    if depth > 12:
+        return
+    if isinstance(node, dict):
+        for k in node:
+            if isinstance(k, str) and _is_unknown_ad_key(k):
+                _log_discovery(k)
+        for v in node.values():
+            _scan_for_discoveries(v, depth + 1)
+    elif isinstance(node, list):
+        for item in node:
+            _scan_for_discoveries(item, depth + 1)
+
 
 # ── Known Protobuf field numbers for ad data in PlayerResponse ───────────────
 # Field 12 = playerAds, 13 = adSlots, 46 = adBreakParams.
@@ -176,6 +234,8 @@ class YouTubeAdStripper:
             return
 
         data, removed = _strip_json(data)
+        # Scan the stripped response for ad keys YouTube may have added recently
+        _scan_for_discoveries(data)
         if removed:
             flow.response.text = json.dumps(data, separators=(",", ":"))
             ctx.log.info(

@@ -161,6 +161,41 @@ else
 fi
 
 # =============================================================================
+# 3b. YOUTUBE AD-STRIP KEY UPDATE
+# =============================================================================
+log "Running YouTube ad-strip adaptive update..."
+
+PY3_BIN=""
+for _py in "$INSTALL_DIR/bin/python3" python3 python; do
+    if command -v "$_py" >/dev/null 2>&1 || [ -f "$_py" ]; then
+        PY3_BIN="$_py"
+        break
+    fi
+done
+
+YT_UPDATER="$INSTALL_DIR/yt_updater.py"
+[ -f "$YT_UPDATER" ] || YT_UPDATER="$REPO_DIR/yt_updater.py"
+
+if [ -n "$PY3_BIN" ] && [ -f "$YT_UPDATER" ]; then
+    # Copy to install dir so it can find yt_ad_stripper.py via INSTALL_DIR
+    [ "$YT_UPDATER" = "$REPO_DIR/yt_updater.py" ] && \
+        cp "$YT_UPDATER" "$INSTALL_DIR/yt_updater.py" 2>/dev/null || true
+
+    _UPDATE_RESULT=0
+    "$PY3_BIN" "$INSTALL_DIR/yt_updater.py" --apply \
+        >> /var/log/wifi-adblock-yt-updater.log 2>&1 || _UPDATE_RESULT=$?
+
+    case "$_UPDATE_RESULT" in
+        0) log "YouTube ad keys: already current." ;;
+        1) log "YouTube ad keys: updated with new keys — proxy restarted."; CHANGED=1 ;;
+        2) warn "YouTube ad key update failed load test — rolled back automatically." ;;
+        *) warn "yt_updater.py exited with code $_UPDATE_RESULT — see /var/log/wifi-adblock-yt-updater.log" ;;
+    esac
+else
+    warn "yt_updater.py or Python not found — skipping YouTube key update."
+fi
+
+# =============================================================================
 # 4. ADGUARD HOME BINARY UPDATE
 # =============================================================================
 log "Checking for AdGuard Home updates..."
