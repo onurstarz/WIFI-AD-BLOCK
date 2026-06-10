@@ -120,6 +120,53 @@ def _mark_seen(ip: str) -> None:
             f.write(mac + "\n")
 
 
+def _remove_https_bypass(ip: str) -> None:
+    """
+    Remove the HTTPS pass-through rule for this device so mitmproxy
+    intercepts their HTTPS from now on (requires CA cert to be installed).
+    Also removes their IP from existing_ips.txt so the rule stays gone
+    after a netwatch iptables rebuild.
+    """
+    existing_ips = os.path.join(os.path.dirname(SEEN_FILE), "existing_ips.txt")
+    if os.path.exists(existing_ips):
+        try:
+            with open(existing_ips) as f:
+                lines = f.read().splitlines()
+            lines = [l for l in lines if l.strip() != ip]
+            with open(existing_ips, "w") as f:
+                f.write("\n".join(lines) + ("\n" if lines else ""))
+        except OSError:
+            pass
+
+    # Remove live iptables rule (best-effort; netwatch will not re-add it
+    # because the IP is now gone from existing_ips.txt)
+    try:
+        subprocess.run(
+            ["iptables", "-t", "nat", "-D", "MITMPROXY",
+             "-s", ip, "-p", "tcp", "--dport", "443", "-j", "RETURN"],
+            capture_output=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def _upgrade_done_html() -> str:
+    return """<!DOCTYPE html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+  body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,sans-serif;
+       display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+  .box{text-align:center;padding:2rem}
+  h2{color:#3fb950;font-size:1.6rem}
+  p{color:#8b949e;max-width:320px;margin:.8rem auto}
+</style></head><body>
+<div class=box>
+  <h2>&#10003; Full protection enabled</h2>
+  <p>HTTPS inspection is now active for your device.</p>
+  <p>YouTube ads, malware download scanning, and HTTPS ad stripping are all on.</p>
+</div></body></html>"""
+
+
 # ── Request handler ───────────────────────────────────────────────────────────
 
 class PortalHandler(http.server.BaseHTTPRequestHandler):
@@ -171,6 +218,17 @@ class PortalHandler(http.server.BaseHTTPRequestHandler):
         if path == "/portal-accept":
             _mark_seen(client_ip)
             self._send(302, headers={"Location": "/portal-done"})
+            return
+
+        # ── Cert installed → upgrade to full HTTPS protection ─────────────────
+        # Existing devices have a HTTPS pass-through rule so their traffic is
+        # never intercepted (no cert errors). When they install the CA cert and
+        # hit this endpoint, we remove that bypass rule — from that point their
+        # HTTPS traffic goes through mitmproxy like any new device.
+        if path == "/cert-upgrade":
+            _remove_https_bypass(client_ip)
+            _mark_seen(client_ip)
+            self._send(200, "text/html; charset=utf-8", _upgrade_done_html())
             return
 
         if path == "/portal-done":

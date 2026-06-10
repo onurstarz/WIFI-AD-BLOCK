@@ -148,9 +148,15 @@ hdr "Step 7/10 — NetWatch daemon (ARP intercept, portable network support)"
 sh "$REPO_DIR/netwatch_setup.sh" 2>&1 | tee -a "$LOG_FILE"
 
 # =============================================================================
-# STEP 8 — INSTALL AUTOUPDATE (1–7 AM WINDOW)
+# STEP 8 — ONBOARD EXISTING DEVICES (silent, zero interaction)
 # =============================================================================
-hdr "Step 8/10 — Autoupdate timer (1–7 AM)"
+hdr "Step 8/10 — Silent onboarding for existing devices"
+sh "$REPO_DIR/onboard_existing.sh" 2>&1 | tee -a "$LOG_FILE"
+
+# =============================================================================
+# STEP 9 — INSTALL AUTOUPDATE (1–7 AM WINDOW)
+# =============================================================================
+hdr "Step 9/10 — Autoupdate timer (1–7 AM)"
 
 INIT_SYS="sysvinit"
 [ -d /run/systemd/system ] && INIT_SYS=systemd
@@ -194,7 +200,7 @@ fi
 # =============================================================================
 # STEP 9 — INSTALL WATCHDOG (EVERY 10 MINUTES)
 # =============================================================================
-hdr "Step 9/10 — Watchdog timer (every 10 min)"
+hdr "Step 10/10 — Watchdog timer (every 10 min)"
 
 if [ "$INIT_SYS" = "systemd" ]; then
     cat > /etc/systemd/system/wifi-adblock-watchdog.timer << EOF
@@ -230,7 +236,7 @@ fi
 # =============================================================================
 # STEP 10 — HEALTH CHECK
 # =============================================================================
-hdr "Step 10/10 — Verifying all layers are live"
+hdr "Step 11/10 — Verifying all layers are live"
 sleep 5  # give services a moment to fully start
 sh "$REPO_DIR/healthcheck.sh" -q 2>&1 | tee -a "$LOG_FILE" || true
 

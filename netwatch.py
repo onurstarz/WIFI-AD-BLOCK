@@ -430,6 +430,27 @@ def apply_iptables(net: NetworkInfo) -> None:
                  "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]:
         ipt("-t", "nat", "-A", "MITMPROXY", "-d", cidr, "-j", "RETURN")
 
+    # Existing devices — HTTPS pass-through (no cert required, no errors).
+    # These were on the network before install; they get full DNS protection
+    # but their HTTPS is not intercepted until they install the CA cert.
+    # IPs that have upgraded (cert installed via /cert-upgrade) are removed
+    # from this file automatically by portal_server.py.
+    existing_ips_file = os.path.join(INSTALL_DIR, "existing_ips.txt")
+    if os.path.exists(existing_ips_file):
+        bypassed = 0
+        try:
+            with open(existing_ips_file) as f:
+                for line in f:
+                    ip = line.strip()
+                    if ip:
+                        ipt("-t", "nat", "-A", "MITMPROXY",
+                            "-s", ip, "-p", "tcp", "--dport", "443", "-j", "RETURN")
+                        bypassed += 1
+            if bypassed:
+                log.info(f"HTTPS bypass rules applied for {bypassed} existing device(s)")
+        except OSError:
+            pass
+
     # Redirect HTTP + HTTPS → mitmproxy
     ipt("-t", "nat", "-A", "MITMPROXY",
         "-p", "tcp", "--dport", "80",  "-j", "REDIRECT",
