@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import http.server
 import os
+import re
 import subprocess
 import threading
 from typing import Optional
@@ -180,6 +181,108 @@ def _upgrade_done_html() -> str:
 </div></body></html>"""
 
 
+# ── Universal one-tap cert install ────────────────────────────────────────────
+# Fixed UUIDs so re-installing the profile REPLACES the old one instead of
+# stacking duplicates in Settings.
+_PROFILE_UUID = "2f1c9e10-3b4a-4c5d-8e6f-a1b2c3d4e5f6"
+_PAYLOAD_UUID = "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d"
+
+
+def _read_cert_b64_der() -> Optional[str]:
+    """Return the CA cert as base64 DER (the body of the PEM, markers stripped)."""
+    pem = os.path.join(CERT_DIR, "mitmproxy-ca-cert.pem")
+    if not os.path.exists(pem):
+        return None
+    try:
+        with open(pem) as f:
+            content = f.read()
+    except OSError:
+        return None
+    m = re.search(
+        r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----",
+        content, re.S,
+    )
+    if not m:
+        return None
+    return "".join(m.group(1).split())
+
+
+def _mobileconfig() -> Optional[str]:
+    """
+    Build an Apple configuration profile (.mobileconfig) that installs the CA
+    cert as a trusted root. Tapping a link to this in Safari triggers the
+    native 'Profile Downloaded' install flow — the same mechanism used by
+    sideloading / MDM enrolment.
+    """
+    b64 = _read_cert_b64_der()
+    if not b64:
+        return None
+    wrapped = "\n".join(b64[i:i + 64] for i in range(0, len(b64), 64))
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadCertificateFileName</key>
+      <string>wifi-adblock-ca.cer</string>
+      <key>PayloadContent</key>
+      <data>
+{wrapped}
+      </data>
+      <key>PayloadDescription</key>
+      <string>Installs the WiFi AdBlock root certificate.</string>
+      <key>PayloadDisplayName</key>
+      <string>WiFi AdBlock Root Certificate</string>
+      <key>PayloadIdentifier</key>
+      <string>com.wifiadblock.ca</string>
+      <key>PayloadType</key>
+      <string>com.apple.security.root</string>
+      <key>PayloadUUID</key>
+      <string>{_PAYLOAD_UUID}</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+    </dict>
+  </array>
+  <key>PayloadDescription</key>
+  <string>Removes ads, trackers and malware from encrypted traffic while you are on this Wi-Fi. Remove anytime under Settings &gt; General &gt; VPN &amp; Device Management.</string>
+  <key>PayloadDisplayName</key>
+  <string>WiFi AdBlock Protection</string>
+  <key>PayloadIdentifier</key>
+  <string>com.wifiadblock.profile</string>
+  <key>PayloadOrganization</key>
+  <string>WiFi AdBlock</string>
+  <key>PayloadRemovalDisallowed</key>
+  <false/>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>{_PROFILE_UUID}</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>
+"""
+
+
+def _detect_os(ua: str) -> str:
+    ua = (ua or "").lower()
+    if "iphone" in ua or "ipad" in ua or "ipod" in ua:
+        return "ios"
+    if "macintosh" in ua or "mac os x" in ua:
+        return "macos"
+    if "android" in ua:
+        return "android"
+    if "windows" in ua:
+        return "windows"
+    if "cros" in ua:
+        return "chromeos"
+    if "linux" in ua:
+        return "linux"
+    return "other"
+
+
 # ── Request handler ───────────────────────────────────────────────────────────
 
 class PortalHandler(http.server.BaseHTTPRequestHandler):
@@ -211,6 +314,36 @@ class PortalHandler(http.server.BaseHTTPRequestHandler):
                 "application/x-x509-ca-cert",
                 "mitmproxy-ca-cert.cer",
             )
+            return
+
+        # ── Universal one-tap installer ───────────────────────────────────────
+        # A single page any device can open. Detects the OS and serves the
+        # native install flow (Apple config profile / Android CA import /
+        # Windows cert wizard).
+        if path == "/install":
+            ua = self.headers.get("User-Agent", "")
+            self._send(200, "text/html; charset=utf-8",
+                       _install_landing_html(_detect_box_ip(), _detect_os(ua)))
+            return
+
+        # ── Apple configuration profile ───────────────────────────────────────
+        # Tapping a link to this in Safari triggers the native profile-install
+        # prompt (the "iOS profile" mechanism). MIME must be aspen-config.
+        if path in ("/wifi-adblock.mobileconfig", "/profile.mobileconfig"):
+            cfg = _mobileconfig()
+            if cfg is None:
+                self._send(404, "text/plain",
+                           "Certificate not found. Run setup.sh first.\n")
+                return
+            data = cfg.encode()
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "application/x-apple-aspen-config; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="wifi-adblock.mobileconfig"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
 
         # ── Captive-portal detection probes ───────────────────────────────────
@@ -365,13 +498,10 @@ h1{{font-size:1.2rem;font-weight:700;color:#f0c040;letter-spacing:-.01em}}
 
     <div class="cert-box">
       <h3>Install the security certificate</h3>
-      <p>Lets the network remove ads from encrypted traffic.
-         Works like a corporate CA — fully removable at any time.</p>
-      <a class="btn btn-pem" href="http://{box_ip}/mitmproxy-ca-cert.pem">
-        Download — iOS / macOS / Windows (.pem)
-      </a>
-      <a class="btn btn-cer" href="http://{box_ip}/mitmproxy-ca-cert.cer">
-        Download — Android (.cer)
+      <p>One tap — we detect your device and walk you through it.
+         Works like a corporate CA, fully removable at any time.</p>
+      <a class="btn btn-pem" href="http://{box_ip}/install">
+        ✨ &nbsp;One-Tap Install — Set Up My Device
       </a>
       <a class="btn btn-activated" href="/cert-upgrade">
         ✓ &nbsp;I've installed it — enable full protection
@@ -471,14 +601,10 @@ h1{{font-size:1.25rem;font-weight:700;color:#6ddf6d;letter-spacing:-.01em}}
     <div class="cert-box">
       <h3>⚡ Optional: Full YouTube App Ad Blocking</h3>
       <p>The certificate lets the network also remove YouTube ads inside the
-         YouTube app. Skip this if you only use YouTube in a browser.</p>
+         YouTube app. One tap — we detect your device and guide you.</p>
       <a class="btn btn-cert-ios"
-         href="http://{box_ip}/mitmproxy-ca-cert.pem">
-        Install Certificate &nbsp;—&nbsp; iOS / macOS / Windows
-      </a>
-      <a class="btn btn-cert-and"
-         href="http://{box_ip}/mitmproxy-ca-cert.cer">
-        Install Certificate &nbsp;—&nbsp; Android (.cer)
+         href="http://{box_ip}/install">
+        ✨ &nbsp;One-Tap Install — Set Up My Device
       </a>
     </div>
     <a class="btn btn-accept" href="/portal-accept">
@@ -487,6 +613,183 @@ h1{{font-size:1.25rem;font-weight:700;color:#6ddf6d;letter-spacing:-.01em}}
     <p class="note">
       Ad blocking is already active without the certificate.<br>
       This notice won't appear again on this device.
+    </p>
+  </div>
+</div>
+</body></html>"""
+
+
+def _install_landing_html(box_ip: str, os_name: str) -> str:
+    """
+    Universal cert-install landing page. Detects the device's OS server-side
+    and shows the matching one-tap method as the hero, with every other
+    platform tucked into an expandable section below.
+    """
+    base = f"http://{box_ip}"
+
+    # Per-OS hero blocks ------------------------------------------------------
+    ios_hero = f"""
+      <div class="hero">
+        <div class="big">📱</div>
+        <h2>Install on iPhone / iPad</h2>
+        <p>One tap. Opens Apple's built-in profile installer.</p>
+        <a class="cta" href="{base}/wifi-adblock.mobileconfig">Install Profile</a>
+        <ol class="steps">
+          <li>Tap <b>Install Profile</b> above — Safari shows
+              “Profile Downloaded”.</li>
+          <li>Open <b>Settings</b> → tap <b>Profile Downloaded</b> →
+              <b>Install</b> (top-right), enter your passcode.</li>
+          <li><b>Important:</b> go to <b>Settings → General → About →
+              Certificate Trust Settings</b> and turn <b>ON</b> the switch for
+              “WiFi AdBlock”.</li>
+        </ol>
+        <p class="warn">Step 3 is required — without it iOS won't fully trust
+           the certificate and YouTube-app ad stripping stays off.</p>
+      </div>"""
+
+    macos_hero = f"""
+      <div class="hero">
+        <div class="big">💻</div>
+        <h2>Install on Mac</h2>
+        <p>Downloads a configuration profile.</p>
+        <a class="cta" href="{base}/wifi-adblock.mobileconfig">Download Profile</a>
+        <ol class="steps">
+          <li>Open the downloaded <b>.mobileconfig</b> file.</li>
+          <li><b>System Settings → General → VPN &amp; Device Management</b> →
+              double-click the profile → <b>Install</b>.</li>
+          <li>It's added as a trusted root automatically.</li>
+        </ol>
+      </div>"""
+
+    android_hero = f"""
+      <div class="hero">
+        <div class="big">🤖</div>
+        <h2>Install on Android</h2>
+        <a class="cta" href="{base}/mitmproxy-ca-cert.cer">Download Certificate</a>
+        <ol class="steps">
+          <li>Tap <b>Download Certificate</b> above.</li>
+          <li>Open <b>Settings</b>, search <b>“CA certificate”</b> (or
+              Security → Encryption &amp; credentials → Install a certificate →
+              <b>CA certificate</b>).</li>
+          <li>Choose the downloaded file → confirm <b>Install anyway</b>.</li>
+        </ol>
+        <p class="warn">Android note: the certificate goes into the user store,
+           which browsers trust but most apps (incl. the YouTube app) do not.
+           DNS-level ad blocking is already protecting this device regardless —
+           the cert mainly adds browser HTTPS coverage unless the phone is
+           rooted.</p>
+      </div>"""
+
+    windows_hero = f"""
+      <div class="hero">
+        <div class="big">🪟</div>
+        <h2>Install on Windows</h2>
+        <a class="cta" href="{base}/mitmproxy-ca-cert.pem">Download Certificate</a>
+        <ol class="steps">
+          <li>Tap <b>Download Certificate</b>, then open the file.</li>
+          <li>Click <b>Install Certificate</b> → <b>Local Machine</b> →
+              <b>Place all certificates in the following store</b> →
+              <b>Trusted Root Certification Authorities</b>.</li>
+          <li>Finish → <b>Yes</b> on the security prompt.</li>
+        </ol>
+      </div>"""
+
+    linux_hero = f"""
+      <div class="hero">
+        <div class="big">🐧</div>
+        <h2>Install on Linux</h2>
+        <a class="cta" href="{base}/mitmproxy-ca-cert.pem">Download Certificate</a>
+        <ol class="steps">
+          <li><code>sudo cp mitmproxy-ca-cert.pem
+              /usr/local/share/ca-certificates/wifi-adblock.crt</code></li>
+          <li><code>sudo update-ca-certificates</code></li>
+        </ol>
+      </div>"""
+
+    heroes = {
+        "ios": ios_hero, "macos": macos_hero, "android": android_hero,
+        "windows": windows_hero, "linux": linux_hero, "chromeos": android_hero,
+    }
+    hero = heroes.get(os_name)
+    if hero is None:
+        # Unknown device — show iOS + Android + Windows together as the hero.
+        hero = ios_hero + android_hero + windows_hero
+
+    # Every platform NOT shown as the hero goes in the "other devices" drawer.
+    others_order = ["ios", "macos", "android", "windows", "linux"]
+    other_blocks = "".join(
+        heroes[o] for o in others_order if o != os_name and o in heroes
+    )
+
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Install Protection Certificate</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+     background:#0d0d0d;color:#e0e0e0;min-height:100vh;
+     display:flex;align-items:flex-start;justify-content:center;padding:1rem}}
+.card{{max-width:440px;width:100%;background:#181818;border-radius:18px;
+       border:1px solid #262626;overflow:hidden;margin:1rem 0;
+       box-shadow:0 20px 60px rgba(0,0,0,.6)}}
+.top{{background:linear-gradient(150deg,#0d2b0d 0%,#111e11 100%);
+      padding:1.6rem 1.5rem;text-align:center;border-bottom:1px solid #1e3a1e}}
+.top h1{{font-size:1.2rem;color:#6ddf6d;font-weight:700}}
+.top p{{font-size:.78rem;color:#5a7a5a;margin-top:.3rem}}
+.body{{padding:1.3rem}}
+.hero{{background:#1e1e1e;border:1px solid #2a2a2a;border-radius:12px;
+       padding:1.2rem;margin-bottom:1rem;text-align:center}}
+.hero .big{{font-size:2.4rem;margin-bottom:.4rem}}
+.hero h2{{font-size:1.05rem;color:#e8e8e8;margin-bottom:.3rem}}
+.hero>p{{font-size:.78rem;color:#888;margin-bottom:.9rem}}
+.cta{{display:block;width:100%;text-align:center;padding:.85rem;
+      background:#1a4a1a;color:#7dff7d;border:1px solid #2a6a2a;
+      border-radius:10px;font-size:.95rem;font-weight:600;text-decoration:none;
+      margin-bottom:.9rem}}
+.cta:hover{{opacity:.88}}
+.steps{{text-align:left;margin:.4rem 0 0 1.1rem;color:#bbb}}
+.steps li{{font-size:.8rem;line-height:1.5;margin-bottom:.45rem}}
+.steps b{{color:#e0e0e0}}
+.steps code{{background:#111;border:1px solid #2a2a2a;border-radius:5px;
+             padding:.05rem .3rem;font-size:.74rem;color:#9ad}}
+.warn{{font-size:.72rem;color:#d0a040;background:#1a1400;border:1px solid #332800;
+       border-radius:8px;padding:.6rem;margin-top:.8rem;line-height:1.45;
+       text-align:left}}
+details{{margin-top:.6rem;border-top:1px solid #222;padding-top:.8rem}}
+summary{{font-size:.82rem;color:#888;cursor:pointer;list-style:none}}
+summary::-webkit-details-marker{{display:none}}
+summary:before{{content:"▸ ";color:#555}}
+details[open] summary:before{{content:"▾ "}}
+.done{{margin-top:1rem}}
+.done a{{display:block;text-align:center;padding:.7rem;background:#1a1a1a;
+         color:#7dff7d;border:1px solid #2a5a2a;border-radius:9px;
+         font-size:.82rem;font-weight:600;text-decoration:none}}
+.note{{font-size:.68rem;color:#555;text-align:center;margin-top:.9rem;
+       line-height:1.55}}
+</style>
+</head><body>
+<div class="card">
+  <div class="top">
+    <h1>🔒 Install Protection Certificate</h1>
+    <p>Unlocks YouTube-app ad removal &amp; encrypted-download scanning</p>
+  </div>
+  <div class="body">
+    {hero}
+
+    <div class="done">
+      <a href="{base}/cert-upgrade">✓ I've installed it — enable full protection</a>
+    </div>
+
+    <details>
+      <summary>Installing on a different device?</summary>
+      {other_blocks}
+    </details>
+
+    <p class="note">
+      This certificate only inspects traffic while you're on this Wi-Fi and is
+      removable anytime. Ad blocking already works without it.
     </p>
   </div>
 </div>
