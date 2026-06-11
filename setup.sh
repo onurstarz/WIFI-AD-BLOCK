@@ -342,18 +342,7 @@ apply_iptables() {
 
     iptables -t nat -N MITMPROXY
 
-    # Bypass: traffic originating from the proxy user (breaks the redirect loop).
-    # The --uid-owner match requires xt_owner; gracefully skip if unavailable.
-    if iptables -t nat -A MITMPROXY -m owner --uid-owner "$PROXY_USER" -j RETURN >/dev/null 2>&1; then
-        log "uid-owner match loaded."
-    else
-        warn "xt_owner module unavailable — using mark-based loop prevention instead."
-        # Mark outbound connections made by mitmdump so we can exclude them
-        iptables -t mangle -N MITM_MARK 2>/dev/null || true
-        iptables -t mangle -A OUTPUT -m mark --mark 0x1/0x1 -j RETURN >/dev/null 2>&1 || true
-    fi
-
-    # Bypass: RFC-1918 / loopback (stay on LAN, only intercept internet-bound)
+    # Bypass: RFC-1918 / loopback (only intercept internet-bound traffic)
     for _net in 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
         iptables -t nat -A MITMPROXY -d "$_net" -j RETURN
     done
@@ -362,10 +351,22 @@ apply_iptables() {
     iptables -t nat -A MITMPROXY -p tcp --dport 80  -j REDIRECT --to-port "$PROXY_PORT"
     iptables -t nat -A MITMPROXY -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT"
 
-    # Hook into PREROUTING (forwarded traffic from other devices)
-    iptables -t nat -A PREROUTING -j MITMPROXY
-    # Hook into OUTPUT (traffic from this box itself)
-    iptables -t nat -A OUTPUT -j MITMPROXY
+    # Hook into PREROUTING (forwarded traffic from other devices on the LAN).
+    # NOTE: uid-owner match must NOT be inside MITMPROXY chain — it is invalid
+    # in prerouting context and causes nftables-backed iptables to reject the
+    # PREROUTING jump entirely. The uid-owner exclusion lives in OUTPUT instead.
+    iptables -t nat -A PREROUTING -j MITMPROXY 2>/dev/null || \
+        warn "PREROUTING hook failed — will be retried by netwatch on next network event"
+
+    # Hook into OUTPUT (traffic from this box itself).
+    # Exclude the proxy user's own traffic first to break the redirect loop.
+    if iptables -t nat -A OUTPUT -m owner --uid-owner "$PROXY_USER" -j RETURN 2>/dev/null; then
+        log "uid-owner match loaded."
+    else
+        warn "uid-owner not available in nat OUTPUT — loop prevention may be limited"
+    fi
+    iptables -t nat -A OUTPUT -j MITMPROXY 2>/dev/null || \
+        warn "OUTPUT hook failed"
 
     log "iptables rules applied."
 }
