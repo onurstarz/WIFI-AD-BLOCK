@@ -255,7 +255,14 @@ sh "$REPO_DIR/healthcheck.sh" -q 2>&1 | tee -a "$LOG_FILE" || true
 hdr "Step 12/12 — Go-live acceptance test"
 sleep 3  # let services settle after the healthcheck
 
-if sh "$REPO_DIR/selftest.sh" 2>&1 | tee -a "$LOG_FILE"; then
+# Pipe to tee swallows the exit code in POSIX sh — capture it via temp file.
+_st_out="/tmp/wifi-adblock-selftest.log"
+sh "$REPO_DIR/selftest.sh" > "$_st_out" 2>&1
+_st_rc=$?
+cat "$_st_out" | tee -a "$LOG_FILE"
+rm -f "$_st_out"
+
+if [ "$_st_rc" = "0" ]; then
     log "Acceptance test PASSED — going live."
 else
     warn "Acceptance test FAILED — triggering self-destruct."
