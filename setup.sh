@@ -446,26 +446,31 @@ chown "$PROXY_USER" "$CERT_DIR" 2>/dev/null || true
 chmod 700 "$CERT_DIR"
 
 gen_certs() {
-    # Run mitmdump briefly to trigger cert generation, then kill it.
-    # The --no-server flag (if supported) exits cleanly after gen.
-    MITM_CMD="$MITMDUMP_BIN --set confdir=$CERT_DIR -q"
-
-    # Try --no-server first (mitmproxy >= 9)
-    if "$MITMDUMP_BIN" --no-server --set confdir="$CERT_DIR" -q >/dev/null 2>&1; then
-        log "Certs generated via --no-server."
-        return
+    # Temporarily remove OUTPUT hook so mitmdump can reach the network without
+    # being redirected to itself (proxy isn't running yet = black hole).
+    _had_output=0
+    if iptables -t nat -L OUTPUT 2>/dev/null | grep -q MITMPROXY; then
+        iptables -t nat -D OUTPUT -j MITMPROXY 2>/dev/null && _had_output=1
+        iptables -t nat -D OUTPUT -m owner --uid-owner "$PROXY_USER" -j RETURN 2>/dev/null || true
     fi
 
-    # Fall back: run in background, wait, kill
-    if command -v su >/dev/null 2>&1 && [ "$PROXY_USER" != "root" ]; then
-        su -s /bin/sh "$PROXY_USER" -c "$MITM_CMD" >/dev/null 2>&1 &
-    else
-        $MITM_CMD >/dev/null 2>&1 &
+    # --no-server exits after cert generation (mitmproxy >= 9).
+    # Fallback: start in background, wait, kill — cert is written on first run.
+    if ! timeout 20 "$MITMDUMP_BIN" --no-server --set confdir="$CERT_DIR" -q >/dev/null 2>&1; then
+        warn "--no-server not supported — using background start method"
+        "$MITMDUMP_BIN" --set confdir="$CERT_DIR" --listen-port "$PROXY_PORT" -q >/dev/null 2>&1 &
+        _cpid=$!
+        sleep 8
+        kill "$_cpid" 2>/dev/null || true
+        wait "$_cpid" 2>/dev/null || true
     fi
-    MITM_PID=$!
-    sleep 4
-    kill "$MITM_PID" >/dev/null 2>&1 || true
-    wait "$MITM_PID" >/dev/null 2>&1 || true
+
+    # Restore OUTPUT hook
+    if [ "$_had_output" = "1" ]; then
+        if iptables -t nat -A OUTPUT -m owner --uid-owner "$PROXY_USER" -j RETURN 2>/dev/null; then :; fi
+        iptables -t nat -A OUTPUT -j MITMPROXY 2>/dev/null || true
+    fi
+    log "Cert generation complete."
 }
 
 if [ ! -f "$CERT_DIR/mitmproxy-ca-cert.pem" ]; then
