@@ -3,16 +3,15 @@
 # WIFI-AD-BLOCK — Go-live acceptance test
 #
 # This is the final gate. install.sh runs this immediately after setup.
-# It does NOT just check that files exist — it drives every feature LIVE and
+# It does NOT just check that files exist — it drives the DNS layer LIVE and
 # proves it actually works on this exact machine, on this exact network.
 #
 # Two classes of check:
 #
-#   CRITICAL  — if any of these fail the system is either non-functional OR
-#               actively harmful (e.g. traffic is being redirected into a dead
-#               proxy = the whole network loses internet). A single critical
-#               failure makes this script exit non-zero, which tells install.sh
-#               to trigger selfdestruct.sh and wipe everything back to clean.
+#   CRITICAL  — if this fails the box is non-functional as a resolver: if it's
+#               the network's DNS and DNS is dead, nothing resolves. A single
+#               critical failure makes this script exit non-zero, which tells
+#               install.sh to trigger selfdestruct.sh and wipe back to clean.
 #
 #   ADVISORY  — degraded-but-safe (e.g. ClamAV DB still downloading, blocklists
 #               not finished syncing). These warn but never trigger teardown.
@@ -23,13 +22,9 @@
 # =============================================================================
 set -u
 
-PROXY_PORT=8080
 AGH_PORT=3000
-PORTAL_PORT=80
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-INSTALL_DIR="/opt/mitm-proxy"
-[ -d "$INSTALL_DIR" ] || INSTALL_DIR="/usr/share/mitm-proxy"
 
 CRIT_FAIL=0
 ADV_WARN=0
@@ -73,7 +68,7 @@ port_listening() {
 printf '\033[1;37m\n'
 printf '═══════════════════════════════════════════════════════════\n'
 printf '  GO-LIVE ACCEPTANCE TEST\n'
-printf '  Proving every layer works before this goes live.\n'
+printf '  Proving the DNS blocker + security layers work.\n'
 printf '═══════════════════════════════════════════════════════════\n'
 printf '\033[0m\n'
 
@@ -84,11 +79,9 @@ printf '\033[0m\n'
 # =============================================================================
 hdr "Phase 0 — File integrity (every feature's code must be valid)"
 
-_SH_FILES="setup.sh dns_sinkhole.sh malware_block.sh network_config.sh
-           captive_portal.sh netwatch_setup.sh onboard_existing.sh
-           autoupdate.sh watchdog.sh healthcheck.sh bypass_censorship.sh"
-_PY_FILES="yt_ad_stripper.py malware_scanner.py netwatch.py portal_server.py
-           dns_optimizer.py yt_updater.py"
+_SH_FILES="dns_sinkhole.sh malware_block.sh autoupdate.sh watchdog.sh
+           healthcheck.sh bypass_censorship.sh selfdestruct.sh"
+_PY_FILES="dns_optimizer.py"
 
 for _f in $_SH_FILES; do
     if [ ! -f "$REPO_DIR/$_f" ]; then
@@ -111,66 +104,12 @@ for _f in $_PY_FILES; do
 done
 
 # =============================================================================
-# PHASE 1 — TRANSPARENT PROXY  (CRITICAL)
-# This is the single most dangerous layer. If iptables is redirecting traffic
-# into the proxy but the proxy is dead, the ENTIRE NETWORK loses internet.
-# That exact combination MUST trigger self-destruct.
-# =============================================================================
-hdr "Phase 1 — Transparent proxy (YouTube stripper + malware scanner)"
-
-PROXY_UP=0
-if service_active mitm-adblock; then
-    c_pass "mitm-adblock service is running"
-    PROXY_UP=1
-else
-    c_crit "mitm-adblock service is NOT running"
-fi
-
-PROXY_LISTENING=0
-if port_listening "$PROXY_PORT"; then
-    c_pass "proxy is listening on :${PROXY_PORT}"
-    PROXY_LISTENING=1
-else
-    c_crit "nothing listening on :${PROXY_PORT} — proxy is dead"
-fi
-
-# The deadly combination check — done explicitly and loudly.
-REDIRECT_ACTIVE=0
-if command -v iptables >/dev/null 2>&1; then
-    if iptables -t nat -L PREROUTING 2>/dev/null | grep -q "MITMPROXY"; then
-        REDIRECT_ACTIVE=1
-    fi
-fi
-if [ "$REDIRECT_ACTIVE" = "1" ] && [ "$PROXY_LISTENING" = "0" ]; then
-    c_crit "DANGER: traffic is being redirected into a DEAD proxy — the whole network would lose internet. Aborting."
-elif [ "$REDIRECT_ACTIVE" = "1" ] && [ "$PROXY_LISTENING" = "1" ]; then
-    c_pass "redirect + live proxy are consistent (no black-hole risk)"
-fi
-
-# Port + service + iptables checks above are the real proof for transparent mode.
-# curl --proxy uses the explicit proxy protocol (CONNECT/absolute-URI) which a
-# transparent proxy intentionally does not speak — any non-2xx/3xx code here is
-# expected and not evidence of a real problem, so we never CRIT on this test.
-if [ "$PROXY_LISTENING" = "1" ] && command -v curl >/dev/null 2>&1; then
-    _code="$(curl -so /dev/null -w '%{http_code}' --proxy "http://127.0.0.1:${PROXY_PORT}" \
-             --max-time 10 "http://example.com" 2>/dev/null || echo 000)"
-    case "$_code" in
-        200|301|302)
-            c_pass "live HTTP request through proxy succeeded (HTTP $_code)" ;;
-        ''|0|000|0000|000000)
-            c_warn "could not reach example.com through proxy (no internet right now?)" ;;
-        *)
-            c_pass "proxy is in transparent mode — explicit-proxy probe returned HTTP $_code (expected)" ;;
-    esac
-fi
-
-# =============================================================================
-# PHASE 2 — DNS SINKHOLE  (CRITICAL)
-# DNS resolution itself is critical: if AdGuard is the network's resolver and
+# PHASE 1 — DNS SINKHOLE  (CRITICAL)
+# DNS resolution itself is critical: if this box is the network's resolver and
 # it's dead, nobody can resolve anything. Ad-domain blocking is ADVISORY
 # (blocklists may still be syncing right after install).
 # =============================================================================
-hdr "Phase 2 — DNS sinkhole (AdGuard Home)"
+hdr "Phase 1 — DNS sinkhole (AdGuard Home)"
 
 if service_active AdGuardHome || service_active adguardhome; then
     c_pass "AdGuardHome service is running"
@@ -211,85 +150,21 @@ if command -v dig >/dev/null 2>&1; then
     fi
 fi
 
-# No DNS loop — port 53 must NOT be redirected into the proxy.
-if command -v iptables >/dev/null 2>&1; then
-    if iptables -t nat -L MITMPROXY 2>/dev/null | grep -q "dpt:53"; then
-        c_crit "port 53 is being redirected into the proxy — this creates a DNS loop"
-    else
-        c_pass "port 53 is not redirected (no DNS loop)"
-    fi
+# Admin UI reachable — ADVISORY.
+if command -v curl >/dev/null 2>&1; then
+    _ui="$(curl -so /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${AGH_PORT}/" 2>/dev/null || echo 000)"
+    case "$_ui" in
+        200|302) c_pass "AdGuard Home admin UI reachable on :${AGH_PORT}" ;;
+        *)       c_warn "AdGuard Home admin UI returned HTTP $_ui on :${AGH_PORT}" ;;
+    esac
 fi
 
 # =============================================================================
-# PHASE 3 — iptables INTERCEPT CHAIN  (CRITICAL)
+# PHASE 2 — WATCHDOG + AUTOUPDATE  (ADVISORY)
+# Self-healing + nightly refresh. If they're not scheduled the system still
+# works right now; it just isn't as resilient. Warn, don't tear down.
 # =============================================================================
-hdr "Phase 3 — iptables intercept chain"
-
-if command -v iptables >/dev/null 2>&1; then
-    if iptables -t nat -L MITMPROXY 2>/dev/null | grep -q "REDIRECT"; then
-        c_pass "MITMPROXY chain has REDIRECT rules"
-    else
-        c_crit "MITMPROXY chain missing or has no REDIRECT rules"
-    fi
-    if iptables -t nat -L PREROUTING 2>/dev/null | grep -q "MITMPROXY"; then
-        c_pass "MITMPROXY is hooked into PREROUTING"
-    else
-        c_crit "MITMPROXY not in PREROUTING — forwarded traffic isn't intercepted"
-    fi
-else
-    c_warn "iptables not available — cannot verify intercept chain"
-fi
-
-# =============================================================================
-# PHASE 4 — CAPTIVE PORTAL + ONBOARDING  (CRITICAL: portal must answer)
-# =============================================================================
-hdr "Phase 4 — Captive portal & device onboarding"
-
-if port_listening "$PORTAL_PORT"; then
-    c_pass "portal is listening on :${PORTAL_PORT}"
-    if command -v curl >/dev/null 2>&1; then
-        _pcode="$(curl -so /dev/null -w '%{http_code}' --max-time 5 \
-                  "http://127.0.0.1:${PORTAL_PORT}/generate_204" 2>/dev/null || echo 000)"
-        case "$_pcode" in
-            204|200) c_pass "portal answered a captive probe (HTTP $_pcode)" ;;
-            *)       c_warn "portal returned HTTP $_pcode to a captive probe" ;;
-        esac
-    fi
-else
-    c_crit "portal is not listening on :${PORTAL_PORT} — new devices get no welcome page"
-fi
-
-# Onboarding lists should exist (created by onboard_existing.sh).
-if [ -f "$INSTALL_DIR/existing_devices.txt" ] || [ -f "$INSTALL_DIR/seen_devices.txt" ]; then
-    c_pass "device tracking lists are present"
-else
-    c_warn "no device tracking lists yet (onboarding may not have run)"
-fi
-
-# =============================================================================
-# PHASE 5 — CA CERTIFICATE  (CRITICAL: HTTPS features depend on it)
-# =============================================================================
-hdr "Phase 5 — CA certificate"
-
-if [ -f "$INSTALL_DIR/certs/mitmproxy-ca-cert.pem" ]; then
-    _exp="$(openssl x509 -noout -enddate -in "$INSTALL_DIR/certs/mitmproxy-ca-cert.pem" 2>/dev/null | cut -d= -f2)"
-    c_pass "CA cert present (expires: ${_exp:-unknown})"
-else
-    c_crit "CA cert missing — HTTPS ad stripping and download scanning cannot work"
-fi
-
-# =============================================================================
-# PHASE 6 — NETWATCH + WATCHDOG DAEMONS  (ADVISORY)
-# Self-healing layers. If they're down the system still works right now; the
-# install just isn't as resilient. Warn, don't tear down.
-# =============================================================================
-hdr "Phase 6 — Self-healing daemons (advisory)"
-
-if service_active wifi-adblock-netwatch || pgrep -f netwatch.py >/dev/null 2>&1; then
-    c_pass "netwatch daemon is running (portable network re-config)"
-else
-    c_warn "netwatch daemon not detected — auto-reconfigure on network change is off"
-fi
+hdr "Phase 2 — Self-healing & autoupdate (advisory)"
 
 if service_active wifi-adblock-watchdog 2>/dev/null \
    || [ -f /etc/systemd/system/wifi-adblock-watchdog.timer ] \
@@ -299,11 +174,18 @@ else
     c_warn "watchdog not scheduled — broken services won't auto-restart"
 fi
 
+if [ -f /etc/systemd/system/wifi-adblock-update.timer ] \
+   || crontab -l 2>/dev/null | grep -q autoupdate.sh; then
+    c_pass "nightly autoupdate is scheduled (blocklists + virus DB + fastest DNS)"
+else
+    c_warn "autoupdate not scheduled — blocklists/virus DB won't refresh nightly"
+fi
+
 # =============================================================================
-# PHASE 7 — ClamAV  (ADVISORY)
+# PHASE 3 — ClamAV  (ADVISORY)
 # DB can take many minutes to download on first install. Never tear down for it.
 # =============================================================================
-hdr "Phase 7 — ClamAV malware scanner (advisory)"
+hdr "Phase 3 — ClamAV malware scanner (advisory)"
 
 if service_active clamav-daemon || service_active clamd; then
     c_pass "ClamAV daemon is running"

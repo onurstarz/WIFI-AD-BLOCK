@@ -2,25 +2,21 @@
 # =============================================================================
 # WIFI-AD-BLOCK — Health check
 #
-# Verifies all four layers of the pipeline are live and working:
-#   1. mitmproxy transparent proxy (YouTube ad stripping + malware scanning)
+# Verifies the two layers of the lean DNS-blocker + security box:
+#   1. AdGuard Home DNS sinkhole (the ad/tracker/malware blocker)
 #   2. ClamAV antivirus daemon
-#   3. AdGuard Home DNS sinkhole
-#   4. iptables redirect rules
 #
 # Prints a clear PASS / WARN / FAIL for each check.
 # Exit code 0 = all good. Exit code 1 = something needs attention.
 # =============================================================================
 set -eu
 
-PROXY_PORT=8080
 AGH_PORT=3000
 
 PASS=0
 WARN=0
 FAIL=0
 
-# ── Colour output ─────────────────────────────────────────────────────────────
 _pass() { printf '\033[1;32m  PASS\033[0m  %s\n' "$*"; PASS=$((PASS+1)); }
 _warn() { printf '\033[1;33m  WARN\033[0m  %s\n' "$*"; WARN=$((WARN+1)); }
 _fail() { printf '\033[1;31m  FAIL\033[0m  %s\n' "$*"; FAIL=$((FAIL+1)); }
@@ -34,7 +30,6 @@ elif [ -f /etc/openwrt_release ]; then INIT_SYS=procd
 elif command -v sv >/dev/null 2>&1; then INIT_SYS=runit
 fi
 
-# Helper: check if a named service is active
 service_active() {
     _svc="$1"
     case "$INIT_SYS" in
@@ -47,114 +42,9 @@ service_active() {
 }
 
 # =============================================================================
-# LAYER 1 — mitmproxy service
+# LAYER 1 — AdGuard Home DNS sinkhole
 # =============================================================================
-_hdr "Layer 1 — mitmproxy transparent proxy"
-
-if service_active mitm-adblock; then
-    _pass "mitm-adblock service is running"
-else
-    _fail "mitm-adblock service is NOT running"
-    case "$INIT_SYS" in
-        systemd) printf '        Fix: sudo systemctl start mitm-adblock\n' ;;
-        openrc)  printf '        Fix: sudo rc-service mitm-adblock start\n' ;;
-        procd)   printf '        Fix: sudo /etc/init.d/mitm-adblock start\n' ;;
-        runit)   printf '        Fix: sudo sv start mitm-adblock\n' ;;
-    esac
-fi
-
-# Check the port is actually listening
-if command -v ss >/dev/null 2>&1; then
-    if ss -tlnp 2>/dev/null | grep -q ":${PROXY_PORT}"; then
-        _pass "Proxy listening on :${PROXY_PORT}"
-    else
-        _fail "Nothing listening on :${PROXY_PORT} — proxy may have crashed"
-    fi
-elif command -v netstat >/dev/null 2>&1; then
-    if netstat -tlnp 2>/dev/null | grep -q ":${PROXY_PORT}"; then
-        _pass "Proxy listening on :${PROXY_PORT}"
-    else
-        _fail "Nothing listening on :${PROXY_PORT}"
-    fi
-else
-    _warn "Cannot check listening ports (ss/netstat not found)"
-fi
-
-# Check the addon scripts are loaded where expected
-for _script in yt_ad_stripper.py malware_scanner.py; do
-    _found=0
-    for _dir in /opt/mitm-proxy /usr/share/mitm-proxy; do
-        [ -f "$_dir/$_script" ] && _found=1 && break
-    done
-    if [ "$_found" = "1" ]; then
-        _pass "$_script present on disk"
-    else
-        _warn "$_script not found in expected install dirs"
-    fi
-done
-
-# =============================================================================
-# LAYER 2 — ClamAV
-# =============================================================================
-_hdr "Layer 2 — ClamAV malware scanner"
-
-CLAMD_RUNNING=0
-for _svc in clamav-daemon clamd; do
-    service_active "$_svc" 2>/dev/null && CLAMD_RUNNING=1 && break
-done
-
-if [ "$CLAMD_RUNNING" = "1" ]; then
-    _pass "clamav-daemon service is running"
-else
-    _warn "clamav-daemon not running as a service (may still be reachable)"
-fi
-
-# Ping the daemon via socket
-CLAMD_SOCK=""
-for _s in /run/clamav/clamd.ctl /var/run/clamav/clamd.ctl \
-          /run/clamav/clamd.sock /var/run/clamav/clamd.socket; do
-    [ -S "$_s" ] && CLAMD_SOCK="$_s" && break
-done
-
-if [ -n "$CLAMD_SOCK" ]; then
-    # Send PING over the socket and expect PONG
-    if command -v nc >/dev/null 2>&1; then
-        PONG="$(printf 'zPING\0' | nc -q1 -U "$CLAMD_SOCK" 2>/dev/null || true)"
-        if echo "$PONG" | grep -q 'PONG'; then
-            _pass "clamd socket responding (PING→PONG)"
-        else
-            _warn "clamd socket found but not responding to PING"
-        fi
-    else
-        _pass "clamd socket exists at $CLAMD_SOCK (nc not available for deeper check)"
-    fi
-else
-    _fail "clamd socket not found — ClamAV daemon may not be running"
-    printf '        Fix: sudo sh malware_block.sh\n'
-fi
-
-# Check DB age — a DB older than 7 days is stale
-DB_AGE_WARN=7
-for _dbdir in /var/lib/clamav /var/lib/clamav-data /var/lib/clamavdb; do
-    if [ -d "$_dbdir" ]; then
-        DAILY_CVD="$(find "$_dbdir" -name 'daily.*' -newer /dev/null 2>/dev/null | head -1)"
-        if [ -n "$DAILY_CVD" ]; then
-            if find "$_dbdir" -name 'daily.*' -mtime "+${DB_AGE_WARN}" 2>/dev/null | grep -q .; then
-                _warn "Virus database is older than ${DB_AGE_WARN} days — run: sudo freshclam"
-            else
-                _pass "Virus database is fresh"
-            fi
-        else
-            _warn "Cannot find daily.cvd/cld in $_dbdir"
-        fi
-        break
-    fi
-done
-
-# =============================================================================
-# LAYER 3 — AdGuard Home
-# =============================================================================
-_hdr "Layer 3 — AdGuard Home DNS sinkhole"
+_hdr "Layer 1 — AdGuard Home DNS sinkhole"
 
 AGH_RUNNING=0
 if service_active AdGuardHome 2>/dev/null; then
@@ -186,7 +76,7 @@ else
     printf '        Fix: Check AdGuard Home is listening on port 53 (Admin UI → DNS settings)\n'
 fi
 
-# Check ad blocking is actually working
+# Check ad blocking is actually working.
 # doubleclick.net is on every major blocklist; it should return NXDOMAIN or 0.0.0.0
 if command -v dig >/dev/null 2>&1; then
     ADTEST="$(dig +short +timeout=3 stats.g.doubleclick.net @127.0.0.1 2>/dev/null | head -1)"
@@ -208,68 +98,61 @@ if command -v curl >/dev/null 2>&1; then
 fi
 
 # =============================================================================
-# LAYER 4 — iptables redirect rules
+# LAYER 2 — ClamAV
 # =============================================================================
-_hdr "Layer 4 — iptables transparent redirect"
+_hdr "Layer 2 — ClamAV malware scanner"
 
-if command -v iptables >/dev/null 2>&1; then
-    if iptables -t nat -L MITMPROXY 2>/dev/null | grep -q "REDIRECT"; then
-        _pass "MITMPROXY chain present with REDIRECT rules"
-    else
-        _fail "MITMPROXY chain missing or has no REDIRECT rules"
-        printf '        Fix: sudo sh setup.sh\n'
-    fi
+CLAMD_RUNNING=0
+for _svc in clamav-daemon clamd; do
+    service_active "$_svc" 2>/dev/null && CLAMD_RUNNING=1 && break
+done
 
-    if iptables -t nat -L PREROUTING 2>/dev/null | grep -q "MITMPROXY"; then
-        _pass "MITMPROXY hooked into PREROUTING"
-    else
-        _fail "MITMPROXY not in PREROUTING chain — forwarded traffic won't be intercepted"
-    fi
-
-    # Check port-53 traffic isn't also being redirected (would cause DNS loops)
-    if iptables -t nat -L MITMPROXY 2>/dev/null | grep -q "dpt:53"; then
-        _warn "Port 53 is being redirected to proxy — this may cause DNS loops"
-    fi
+if [ "$CLAMD_RUNNING" = "1" ]; then
+    _pass "clamav-daemon service is running"
 else
-    _warn "iptables command not available — cannot check redirect rules"
+    _warn "clamav-daemon not running as a service (virus DB may still be downloading)"
 fi
 
-# =============================================================================
-# CA CERTIFICATE
-# =============================================================================
-_hdr "CA Certificate"
+# Ping the daemon via socket
+CLAMD_SOCK=""
+for _s in /run/clamav/clamd.ctl /var/run/clamav/clamd.ctl \
+          /run/clamav/clamd.sock /var/run/clamav/clamd.socket; do
+    [ -S "$_s" ] && CLAMD_SOCK="$_s" && break
+done
 
-CERT_FOUND=0
-for _cdir in /opt/mitm-proxy/certs /usr/share/mitm-proxy/certs; do
-    if [ -f "$_cdir/mitmproxy-ca-cert.pem" ]; then
-        CERT_FOUND=1
-        EXPIRY="$(openssl x509 -noout -enddate -in "$_cdir/mitmproxy-ca-cert.pem" 2>/dev/null \
-                  | cut -d= -f2 || echo 'unknown')"
-        _pass "CA cert present (expires: $EXPIRY)"
-        printf '        Install on devices: http://<this-box-ip>:8888 after running:\n'
-        printf '          cd %s && python3 -m http.server 8888\n' "$_cdir"
+if [ -n "$CLAMD_SOCK" ]; then
+    if command -v nc >/dev/null 2>&1; then
+        PONG="$(printf 'zPING\0' | nc -q1 -U "$CLAMD_SOCK" 2>/dev/null || true)"
+        if echo "$PONG" | grep -q 'PONG'; then
+            _pass "clamd socket responding (PING→PONG)"
+        else
+            _warn "clamd socket found but not responding to PING"
+        fi
+    else
+        _pass "clamd socket exists at $CLAMD_SOCK (nc not available for deeper check)"
+    fi
+else
+    _warn "clamd socket not found — ClamAV daemon may still be starting"
+    printf '        Fix: sudo sh malware_block.sh\n'
+fi
+
+# Check DB age — a DB older than 7 days is stale
+DB_AGE_WARN=7
+for _dbdir in /var/lib/clamav /var/lib/clamav-data /var/lib/clamavdb; do
+    if [ -d "$_dbdir" ]; then
+        DAILY_CVD="$(find "$_dbdir" -name 'daily.*' -newer /dev/null 2>/dev/null | head -1)"
+        if [ -n "$DAILY_CVD" ]; then
+            if find "$_dbdir" -name 'daily.*' -mtime "+${DB_AGE_WARN}" 2>/dev/null | grep -q .; then
+                _warn "Virus database is older than ${DB_AGE_WARN} days — run: sudo freshclam"
+            else
+                _pass "Virus database is fresh"
+            fi
+        else
+            _warn "Cannot find daily.cvd/cld in $_dbdir"
+        fi
         break
     fi
 done
-[ "$CERT_FOUND" = "0" ] && _fail "CA cert not found — run setup.sh to generate it"
-
-# =============================================================================
-# LIVE EICAR DOWNLOAD TEST (optional, skipped if -q flag given)
-# =============================================================================
-if [ "${1:-}" != "-q" ] && command -v curl >/dev/null 2>&1; then
-    _hdr "Live malware block test (EICAR)"
-    # EICAR is the industry-standard harmless AV test string, not real malware.
-    # It should be intercepted and replaced by a 403 block page.
-    EICAR_STATUS="$(curl -so /dev/null -w '%{http_code}' --proxy "http://127.0.0.1:${PROXY_PORT}" \
-        --max-time 10 "http://www.eicar.org/download/eicar.com" 2>/dev/null || echo "0")"
-    if [ "$EICAR_STATUS" = "403" ]; then
-        _pass "EICAR test file blocked (HTTP 403) — ClamAV scanning is live"
-    elif [ "$EICAR_STATUS" = "0" ]; then
-        _warn "Could not reach eicar.org — skipping EICAR test (check internet connectivity)"
-    else
-        _warn "EICAR test returned HTTP $EICAR_STATUS — scanner may not be active (expected 403)"
-    fi
-fi
 
 # =============================================================================
 # SUMMARY

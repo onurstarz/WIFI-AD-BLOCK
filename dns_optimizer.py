@@ -16,7 +16,7 @@ AdGuard Home to whichever is provably fastest.
 Gaming domains get an explicit [/domain/]<fastest_ip> override entry
 in AdGuard Home so those lookups bypass fallback chains entirely.
 
-Called by:  autoupdate.sh (nightly), netwatch.py (on network change)
+Called by:  autoupdate.sh (nightly)
 Manual:
   python3 dns_optimizer.py              benchmark + apply if better
   python3 dns_optimizer.py --force      always apply winner

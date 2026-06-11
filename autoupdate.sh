@@ -8,23 +8,16 @@
 # Updates (in order):
 #   1. ClamAV virus signatures (freshclam)
 #   2. AdGuard Home blocklists (API refresh)
-#   3. Python packages in mitmproxy virtualenv (with rollback on failure)
-#   4. AdGuard Home binary (if new version available)
+#   3. Adaptive DNS optimizer — re-benchmark and switch to the fastest server
+#   4. AdGuard Home binary (if a new version is available)
 #   5. Security-only system package updates
 #   6. Restart services if anything changed
-#   7. Run healthcheck — roll back and alert if broken
+#   7. Run healthcheck — alert if broken
 # =============================================================================
 set -eu
 
 LOCK_FILE="/var/run/wifi-adblock-update.lock"
 LOG_HEADER="[autoupdate $(date '+%Y-%m-%d %H:%M:%S')]"
-
-# Install dir (must match setup.sh)
-if [ -d /opt/mitm-proxy ]; then
-    INSTALL_DIR="/opt/mitm-proxy"
-else
-    INSTALL_DIR="/usr/share/mitm-proxy"
-fi
 
 REPO_DIR="$(cat /etc/wifi-adblock-installed 2>/dev/null | grep REPO_DIR | cut -d= -f2)"
 [ -z "$REPO_DIR" ] && REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -54,7 +47,6 @@ CHANGED=0
 # =============================================================================
 log "Updating ClamAV signatures..."
 if command -v freshclam >/dev/null 2>&1; then
-    # Stop the daemon briefly if it holds the lock
     if command -v systemctl >/dev/null 2>&1; then
         systemctl stop clamav-freshclam 2>/dev/null || true
     fi
@@ -75,7 +67,6 @@ fi
 # 2. ADGUARD HOME BLOCKLISTS
 # =============================================================================
 log "Refreshing AdGuard Home blocklists..."
-# Try the AGH API (unauthenticated if no password set; fails silently if auth needed)
 if command -v curl >/dev/null 2>&1; then
     REFRESH_STATUS="$(curl -s -o /dev/null -w '%{http_code}' \
         --max-time 30 \
@@ -93,124 +84,23 @@ if command -v curl >/dev/null 2>&1; then
 fi
 
 # =============================================================================
-# 3. PYTHON PACKAGES — with pre/post test + rollback
+# 3. ADAPTIVE DNS OPTIMIZER — re-benchmark and switch to fastest server
 # =============================================================================
-log "Updating Python packages..."
-
-PIP_BIN=""
-if [ -f "$INSTALL_DIR/bin/pip" ]; then
-    PIP_BIN="$INSTALL_DIR/bin/pip"
-elif command -v pip3 >/dev/null 2>&1; then
-    PIP_BIN="$(command -v pip3)"
-fi
-
-MITMDUMP_BIN=""
-if [ -f "$INSTALL_DIR/bin/mitmdump" ]; then
-    MITMDUMP_BIN="$INSTALL_DIR/bin/mitmdump"
-elif command -v mitmdump >/dev/null 2>&1; then
-    MITMDUMP_BIN="$(command -v mitmdump)"
-fi
-
-if [ -n "$PIP_BIN" ] && [ -n "$MITMDUMP_BIN" ]; then
-    # Save current versions for rollback
-    PREV_MITMPROXY="$("$PIP_BIN" show mitmproxy 2>/dev/null | awk '/^Version/ {print $2}')"
-    PREV_BBP="$("$PIP_BIN" show blackboxprotobuf 2>/dev/null | awk '/^Version/ {print $2}')"
-    PREV_CLAMD="$("$PIP_BIN" show clamd 2>/dev/null | awk '/^Version/ {print $2}')"
-
-    # Perform upgrade (quiet — only print on error)
-    if "$PIP_BIN" install --upgrade mitmproxy blackboxprotobuf clamd \
-            --quiet 2>/dev/null; then
-
-        NEW_MITMPROXY="$("$PIP_BIN" show mitmproxy 2>/dev/null | awk '/^Version/ {print $2}')"
-
-        # POST-UPGRADE TEST: verify addons still load cleanly
-        TEST_OK=0
-        if "$MITMDUMP_BIN" --version >/dev/null 2>&1; then
-            # Try loading both addons in no-server mode with a 10s timeout
-            if timeout 10 "$MITMDUMP_BIN" \
-                --set confdir="$INSTALL_DIR/certs" \
-                -s "$INSTALL_DIR/yt_ad_stripper.py" \
-                -s "$INSTALL_DIR/malware_scanner.py" \
-                --no-server >/dev/null 2>&1; then
-                TEST_OK=1
-            fi
-        fi
-
-        if [ "$TEST_OK" = "1" ]; then
-            if [ "$NEW_MITMPROXY" != "$PREV_MITMPROXY" ]; then
-                log "mitmproxy updated: $PREV_MITMPROXY → $NEW_MITMPROXY"
-                CHANGED=1
-            else
-                log "Python packages already current ($NEW_MITMPROXY)."
-            fi
-        else
-            warn "Post-upgrade addon test FAILED — rolling back mitmproxy."
-            [ -n "$PREV_MITMPROXY" ] && \
-                "$PIP_BIN" install --quiet "mitmproxy==${PREV_MITMPROXY}" 2>/dev/null || true
-            [ -n "$PREV_BBP"       ] && \
-                "$PIP_BIN" install --quiet "blackboxprotobuf==${PREV_BBP}" 2>/dev/null || true
-            [ -n "$PREV_CLAMD"     ] && \
-                "$PIP_BIN" install --quiet "clamd==${PREV_CLAMD}" 2>/dev/null || true
-            warn "Rolled back to mitmproxy $PREV_MITMPROXY — check logs."
-        fi
-    else
-        warn "pip upgrade failed — packages unchanged."
-    fi
-else
-    warn "pip or mitmdump not found at $INSTALL_DIR — skipping Python update."
-fi
-
-# =============================================================================
-# 3b. YOUTUBE AD-STRIP KEY UPDATE
-# =============================================================================
-log "Running YouTube ad-strip adaptive update..."
+log "Re-benchmarking DNS servers (location-aware adaptive selection)..."
 
 PY3_BIN=""
-for _py in "$INSTALL_DIR/bin/python3" python3 python; do
-    if command -v "$_py" >/dev/null 2>&1 || [ -f "$_py" ]; then
-        PY3_BIN="$_py"
+for _py in python3 python; do
+    if command -v "$_py" >/dev/null 2>&1; then
+        PY3_BIN="$(command -v "$_py")"
         break
     fi
 done
 
-YT_UPDATER="$INSTALL_DIR/yt_updater.py"
-[ -f "$YT_UPDATER" ] || YT_UPDATER="$REPO_DIR/yt_updater.py"
-
-if [ -n "$PY3_BIN" ] && [ -f "$YT_UPDATER" ]; then
-    # Copy to install dir so it can find yt_ad_stripper.py via INSTALL_DIR
-    [ "$YT_UPDATER" = "$REPO_DIR/yt_updater.py" ] && \
-        cp "$YT_UPDATER" "$INSTALL_DIR/yt_updater.py" 2>/dev/null || true
-
-    _UPDATE_RESULT=0
-    "$PY3_BIN" "$INSTALL_DIR/yt_updater.py" --apply \
-        >> /var/log/wifi-adblock-yt-updater.log 2>&1 || _UPDATE_RESULT=$?
-
-    case "$_UPDATE_RESULT" in
-        0) log "YouTube ad keys: already current." ;;
-        1) log "YouTube ad keys: updated with new keys — proxy restarted."; CHANGED=1 ;;
-        2) warn "YouTube ad key update failed load test — rolled back automatically." ;;
-        *) warn "yt_updater.py exited with code $_UPDATE_RESULT — see /var/log/wifi-adblock-yt-updater.log" ;;
-    esac
-else
-    warn "yt_updater.py or Python not found — skipping YouTube key update."
-fi
-
-# =============================================================================
-# 3c. ADAPTIVE DNS OPTIMIZER — re-benchmark and switch to fastest server
-# =============================================================================
-log "Re-benchmarking DNS servers (location-aware adaptive selection)..."
-
-DNS_OPT="$INSTALL_DIR/dns_optimizer.py"
-[ -f "$DNS_OPT" ] || DNS_OPT="$REPO_DIR/dns_optimizer.py"
-
+DNS_OPT="$REPO_DIR/dns_optimizer.py"
 if [ -n "$PY3_BIN" ] && [ -f "$DNS_OPT" ]; then
-    [ "$DNS_OPT" = "$REPO_DIR/dns_optimizer.py" ] && \
-        cp "$DNS_OPT" "$INSTALL_DIR/dns_optimizer.py" 2>/dev/null || true
-
     _DNS_RESULT=0
-    "$PY3_BIN" "$INSTALL_DIR/dns_optimizer.py" \
+    "$PY3_BIN" "$DNS_OPT" \
         >> /var/log/wifi-adblock-dns-optimizer.log 2>&1 || _DNS_RESULT=$?
-
     if [ "$_DNS_RESULT" = "1" ]; then
         log "DNS optimizer: switched to a faster server."
         CHANGED=1
@@ -226,7 +116,6 @@ fi
 # =============================================================================
 log "Checking for AdGuard Home updates..."
 if command -v curl >/dev/null 2>&1; then
-    # AGH exposes /control/update_status when it knows about a new release
     UPDATE_STATUS="$(curl -s --max-time 15 \
         "http://127.0.0.1:3000/control/version.json" 2>/dev/null || echo '{}')"
     if printf '%s' "$UPDATE_STATUS" | grep -q '"new_version"'; then
@@ -247,9 +136,7 @@ fi
 log "Applying security system updates..."
 
 if command -v apt-get >/dev/null 2>&1; then
-    # Debian/Ubuntu/Armbian: unattended security updates only
     DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null
-    # Only install security updates, not regular upgrades
     if command -v unattended-upgrade >/dev/null 2>&1; then
         unattended-upgrade --quiet 2>/dev/null && log "unattended-upgrade complete." || true
     else
@@ -275,15 +162,12 @@ fi
 if [ "$CHANGED" = "1" ]; then
     log "Changes detected — restarting services..."
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl restart mitm-adblock    2>/dev/null || warn "mitm-adblock restart failed."
         systemctl restart clamav-daemon   2>/dev/null || \
             systemctl restart clamd       2>/dev/null || true
         systemctl restart AdGuardHome     2>/dev/null || true
     elif command -v rc-service >/dev/null 2>&1; then
-        rc-service mitm-adblock restart   2>/dev/null || true
         rc-service clamd restart          2>/dev/null || true
-    elif [ -x /etc/init.d/mitm-adblock ]; then
-        /etc/init.d/mitm-adblock restart  2>/dev/null || true
+        rc-service AdGuardHome restart    2>/dev/null || true
     fi
     log "Services restarted."
 else
@@ -294,12 +178,11 @@ fi
 # 7. POST-UPDATE HEALTH CHECK
 # =============================================================================
 log "Running post-update health check..."
-sleep 5  # let services settle after restart
+sleep 5
 if sh "$REPO_DIR/healthcheck.sh" -q 2>/dev/null; then
     log "Health check PASSED — all layers operational."
 else
     warn "Health check found issues after update — watchdog will auto-heal."
-    # Trigger the watchdog immediately to attempt repair
     sh "$REPO_DIR/watchdog.sh" 2>/dev/null || true
 fi
 

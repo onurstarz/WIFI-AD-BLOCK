@@ -4,11 +4,8 @@
 #
 # This is the workhorse for network-wide ad blocking. It blocks ads that load
 # from separate ad-network domains: mobile game ads (AdMob/Unity/AppLovin),
-# browser banners/pop-ups, in-app banners, tracking, and telemetry.
-#
-# Works alongside the mitmproxy YouTube stripper:
-#   DNS sinkhole = blocks ads delivered from dedicated ad domains
-#   mitmproxy    = strips YouTube ads served from youtubei.googleapis.com
+# browser banners/pop-ups, in-app banners, tracking, and telemetry — across
+# every device on the network, with nothing sitting in the traffic path.
 #
 # AdGuard Home is a single static binary. Its own installer registers a
 # service on systemd / OpenRC / procd / runit / FreeBSD-rc automatically,
@@ -106,8 +103,6 @@ EOF
     log "systemd-resolved stub listener disabled; port 53 is now free."
 fi
 
-# dnsmasq from network_config.sh runs DHCP-only (port=0), so no conflict there.
-
 # =============================================================================
 # 5. START
 # =============================================================================
@@ -143,6 +138,5 @@ log "  • HaGeZi Multi PRO              github.com/hagezi/dns-blocklists"
 log "  • Peter Lowe's list             — ad servers + tracking"
 printf '\n'
 log "THEN point your network's DNS at this box:"
-log "  • In network_config.sh set DNS_SERVER=\"${BOX_IP_GUESS}\" and re-run it,"
-log "    OR set your router's DHCP DNS option to ${BOX_IP_GUESS}."
+log "  • Set your router's DHCP DNS option to ${BOX_IP_GUESS} (primary AND secondary)."
 log "  • Reconnect devices so they pick up the new DNS server."
