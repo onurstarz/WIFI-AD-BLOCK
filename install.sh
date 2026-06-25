@@ -15,11 +15,13 @@
 #   1. Auto-detects the network interface and this box's IP.
 #   2. Runs dns_sinkhole.sh  — AdGuard Home DNS ad/tracker/malware blocking.
 #   3. Runs malware_block.sh — ClamAV daemon + DNS Safe Browsing.
-#   4. Installs autoupdate timer (nightly 1–7 AM: blocklists, virus DB,
+#   4. Runs content_filter.sh — adult-content blocking (HaGeZi NSFW blocklist,
+#      Parental Control, SafeSearch / YouTube Restricted Mode).
+#   5. Installs autoupdate timer (nightly 1–7 AM: blocklists, virus DB,
 #      fastest-DNS re-benchmark, security patches).
-#   5. Installs watchdog timer (every 10 min, auto-heals broken services).
-#   6. Runs healthcheck.sh to confirm everything is live.
-#   7. Runs selftest.sh — a live go-live test. If a critical layer (DNS) is
+#   6. Installs watchdog timer (every 10 min, auto-heals broken services).
+#   7. Runs healthcheck.sh to confirm everything is live.
+#   8. Runs selftest.sh — a live go-live test. If a critical layer (DNS) is
 #      broken it self-destructs (selfdestruct.sh) back to a clean machine so
 #      the network is never left in a broken state.
 #
@@ -156,19 +158,25 @@ export LAN_IFACE BOX_IP ROUTER_IP
 # =============================================================================
 # STEP 2 — DNS SINKHOLE (the core ad blocker)
 # =============================================================================
-hdr "Step 2/7 — AdGuard Home DNS sinkhole"
+hdr "Step 2/8 — AdGuard Home DNS sinkhole"
 sh "$REPO_DIR/dns_sinkhole.sh" 2>&1 | tee -a "$LOG_FILE"
 
 # =============================================================================
 # STEP 3 — MALWARE SHIELD
 # =============================================================================
-hdr "Step 3/7 — ClamAV malware scanner + DNS Safe Browsing"
+hdr "Step 3/8 — ClamAV malware scanner + DNS Safe Browsing"
 sh "$REPO_DIR/malware_block.sh" 2>&1 | tee -a "$LOG_FILE"
 
 # =============================================================================
-# STEP 4 — AUTOUPDATE TIMER (1–7 AM WINDOW)
+# STEP 4 — ADULT-CONTENT FILTER
 # =============================================================================
-hdr "Step 4/7 — Autoupdate timer (1–7 AM)"
+hdr "Step 4/8 — Adult-content blocking (NSFW blocklist + Parental Control + SafeSearch)"
+sh "$REPO_DIR/content_filter.sh" 2>&1 | tee -a "$LOG_FILE"
+
+# =============================================================================
+# STEP 5 — AUTOUPDATE TIMER (1–7 AM WINDOW)
+# =============================================================================
+hdr "Step 5/8 — Autoupdate timer (1–7 AM)"
 
 if [ "$INIT_SYS" = "systemd" ]; then
     cat > /etc/systemd/system/wifi-adblock-update.timer << EOF
@@ -203,9 +211,9 @@ else
 fi
 
 # =============================================================================
-# STEP 5 — WATCHDOG TIMER (EVERY 10 MINUTES)
+# STEP 6 — WATCHDOG TIMER (EVERY 10 MINUTES)
 # =============================================================================
-hdr "Step 5/7 — Watchdog timer (every 10 min)"
+hdr "Step 6/8 — Watchdog timer (every 10 min)"
 
 if [ "$INIT_SYS" = "systemd" ]; then
     cat > /etc/systemd/system/wifi-adblock-watchdog.timer << EOF
@@ -239,16 +247,16 @@ else
 fi
 
 # =============================================================================
-# STEP 6 — HEALTH CHECK
+# STEP 7 — HEALTH CHECK
 # =============================================================================
-hdr "Step 6/7 — Verifying all layers are live"
+hdr "Step 7/8 — Verifying all layers are live"
 sleep 5
 sh "$REPO_DIR/healthcheck.sh" -q 2>&1 | tee -a "$LOG_FILE" || true
 
 # =============================================================================
-# STEP 7 — GO-LIVE ACCEPTANCE TEST (self-destruct gate)
+# STEP 8 — GO-LIVE ACCEPTANCE TEST (self-destruct gate)
 # =============================================================================
-hdr "Step 7/7 — Go-live acceptance test"
+hdr "Step 8/8 — Go-live acceptance test"
 sleep 3
 
 # Pipe to tee swallows the exit code in POSIX sh — capture it via temp file.

@@ -155,6 +155,22 @@ for _dbdir in /var/lib/clamav /var/lib/clamav-data /var/lib/clamavdb; do
 done
 
 # =============================================================================
+# LAYER 3 — Adult-content filter
+# =============================================================================
+_hdr "Layer 3 — Adult-content filter"
+
+if command -v dig >/dev/null 2>&1; then
+    NSFWTEST="$(dig +short +timeout=3 pornhub.com @127.0.0.1 2>/dev/null | head -1)"
+    if [ -z "$NSFWTEST" ] || [ "$NSFWTEST" = "0.0.0.0" ] || [ "$NSFWTEST" = "::" ]; then
+        _pass "Adult domain blocked (pornhub.com → null)"
+    else
+        _warn "Adult domain NOT blocked → $NSFWTEST  (run: sudo sh content_filter.sh)"
+    fi
+else
+    _warn "no dig available — cannot verify adult-content filter"
+fi
+
+# =============================================================================
 # SUMMARY
 # =============================================================================
 TOTAL=$((PASS+WARN+FAIL))

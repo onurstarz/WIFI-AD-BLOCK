@@ -6,9 +6,10 @@ Layers working together:
 
 1. **DNS sinkhole (AdGuard Home)** — blocks ads delivered from dedicated ad-network domains: mobile game ads (AdMob/Unity/AppLovin), browser banners/pop-ups, in-app banners, tracking, telemetry, and known malware/phishing domains. The workhorse.
 2. **ClamAV** — an on-box antivirus engine, kept running and auto-updated, for scanning files on demand (`clamdscan`).
-3. **Adaptive DNS optimizer** — benchmarks the major public resolvers from your exact location every night and switches AdGuard Home to whichever is provably fastest, so DNS lookups (and page loads) stay snappy.
+3. **Adult-content filter** — 100,000+ NSFW/pornographic domains blocked via the HaGeZi NSFW blocklist; Google/Bing/DuckDuckGo SafeSearch and YouTube Restricted Mode enforced via DNS rewriting for the entire network.
+4. **Adaptive DNS optimizer** — benchmarks the major public resolvers from your exact location every night and switches AdGuard Home to whichever is provably fastest, so DNS lookups (and page loads) stay snappy.
 
-**Stack:** `AdGuard Home` (DNS + malware domains + Safe Browsing) → `Quad9` security upstream · `ClamAV` daemon · `dns_optimizer.py` (fastest-resolver selection) · self-healing `watchdog` + nightly `autoupdate`.
+**Stack:** `AdGuard Home` (DNS + malware domains + Safe Browsing + Parental Control) → `Quad9` security upstream · `ClamAV` daemon · `dns_optimizer.py` (fastest-resolver selection) · self-healing `watchdog` + nightly `autoupdate`.
 
 ---
 
@@ -23,6 +24,9 @@ This project is **DNS-only by design** — it never decrypts traffic. That keeps
 | Most in-app banner / interstitial ads | ✅ | Served from ad domains |
 | Tracking / telemetry | ✅ | Blocked at the resolver |
 | Known malware / phishing domains | ✅ | AdGuard Safe Browsing + Quad9 + blocklists |
+| Adult / pornographic websites | ✅ | 100,000+ NSFW domains — HaGeZi NSFW blocklist |
+| Explicit search results (Google, Bing, DDG) | ✅ | SafeSearch enforced via DNS rewriting |
+| YouTube mature content | ✅ | YouTube Restricted Mode enforced via DNS |
 | YouTube ads (browser **and** app) | ⚠️ partial | Served from the *same* servers as the video — DNS can't separate them |
 | TikTok / Instagram / Spotify feed ads | ❌ | Same-server delivery; not router-blockable |
 

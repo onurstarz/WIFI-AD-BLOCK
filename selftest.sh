@@ -79,7 +79,7 @@ printf '\033[0m\n'
 # =============================================================================
 hdr "Phase 0 — File integrity (every feature's code must be valid)"
 
-_SH_FILES="dns_sinkhole.sh malware_block.sh autoupdate.sh watchdog.sh
+_SH_FILES="dns_sinkhole.sh malware_block.sh content_filter.sh autoupdate.sh watchdog.sh
            healthcheck.sh bypass_censorship.sh selfdestruct.sh"
 _PY_FILES="dns_optimizer.py"
 
@@ -191,6 +191,25 @@ if service_active clamav-daemon || service_active clamd; then
     c_pass "ClamAV daemon is running"
 else
     c_warn "ClamAV daemon not running yet (virus DB may still be downloading)"
+fi
+
+# =============================================================================
+# PHASE 4 — ADULT-CONTENT FILTER  (ADVISORY)
+# The NSFW blocklist can take a minute to download on first install, and
+# parental control / safesearch may not be configured until content_filter.sh
+# has had a chance to edit the yaml. Never tear down for this.
+# =============================================================================
+hdr "Phase 4 — Adult-content filter (advisory)"
+
+if command -v dig >/dev/null 2>&1; then
+    _nsfw="$(dig +short +time=3 +tries=1 pornhub.com @127.0.0.1 2>/dev/null | head -1)"
+    if [ -z "$_nsfw" ] || [ "$_nsfw" = "0.0.0.0" ] || [ "$_nsfw" = "::" ]; then
+        c_pass "adult domain blocked (pornhub.com → null)"
+    else
+        c_warn "adult domain not blocked yet → $_nsfw (NSFW blocklist may still be downloading)"
+    fi
+else
+    c_warn "no dig available — cannot verify adult-content blocking"
 fi
 
 # =============================================================================
